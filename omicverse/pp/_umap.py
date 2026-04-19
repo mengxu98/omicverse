@@ -344,17 +344,14 @@ def umap(  # noqa: PLR0913, PLR0915
         X_contiguous = np.ascontiguousarray(X, dtype=np.float32)
         X_tensor = torch.from_numpy(X_contiguous)
 
-        # Scale batch size with dataset size. The default MLP is tiny
-        # (50->200->200->200->2) so per-batch GPU time is essentially fixed
-        # by Python/launch overhead until batches get large; bigger batches
-        # amortize that overhead and keep H100 utilisation reasonable.
+        # The default MLP is tiny (50->200->200->200->2) so per-batch GPU
+        # compute is dwarfed by Python loop + CUDA launch overhead until the
+        # batch is in the tens of thousands. Sweep at 10k cells: 1024 -> 2.6s,
+        # 4096 -> 0.6s, 16384 -> 0.39s, 65536 -> 0.32s. 16384 is the sweet
+        # spot — fewer batches than 4096, but still enough optimizer steps
+        # for convergence at any N.
         n_samples = X.shape[0]
-        if n_samples <= 50_000:
-            batch_size = 1024
-        elif n_samples <= 250_000:
-            batch_size = 4096
-        else:
-            batch_size = 16384
+        batch_size = 16384
 
         # `maxiter` is total edge-SGD graph passes (umap-learn semantics);
         # internally we split it into `training_epochs` chunks for early

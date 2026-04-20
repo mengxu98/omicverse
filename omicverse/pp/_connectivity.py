@@ -280,12 +280,8 @@ def umap(
 
 
 import torch
-import numpy as np
-import scipy.sparse as sparse
-import time
-import warnings
-from typing import Union, Optional, Tuple
 from scipy.sparse import csr_matrix
+
 
 def umap_gpu_optimized(
     knn_indices: np.ndarray,
@@ -295,144 +291,37 @@ def umap_gpu_optimized(
     n_neighbors: int,
     set_op_mix_ratio: float = 1.0,
     local_connectivity: float = 1.0,
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> csr_matrix:
+    """GPU fuzzy simplicial set wrapping ``umap_pytorch.fuzzy_gpu``.
+
+    Returns a scipy CSR matrix with the same semantics as
+    ``umap.umap_.fuzzy_simplicial_set`` (smooth_knn_dist + membership +
+    probabilistic set union ``A + Aᵀ − A⊙Aᵀ``).
+
+    The previous implementation in this file diverged from umap-learn:
+    ``target_log`` was hardcoded to ``log2(15)`` regardless of
+    ``n_neighbors``, ``sigma`` was capped to 1000, the symmetrization only
+    summed forward and reverse edges (instead of the fuzzy union), and
+    self-loops were not zeroed. This wrapper delegates to the verified
+    torch port shipped in ``omicverse.external.umap_pytorch.fuzzy_gpu``.
     """
-    GPU加速的UMAP fuzzy simplicial set计算 - 优化版本
-    
-    这个版本修复了之前的bug并提供更稳定的实现
-    """
-    # 转换为torch tensors
-    knn_indices_torch = torch.from_numpy(knn_indices).long().to(device)
-    knn_dists_torch = torch.from_numpy(knn_dists).float().to(device)
-    
-    # 步骤1: 计算rho (到最近邻居的距离)
-    rho = knn_dists_torch[:, 0].clamp(min=1e-8)  # 避免零距离
-    
-    # 步骤2: 计算sigma (局部密度标准化参数)
-    sigma = compute_sigma_vectorized(knn_dists_torch, rho, local_connectivity, device)
-    
-    # 步骤3: 计算membership strengths
-    membership_matrix = compute_membership_matrix(
-        knn_indices_torch, knn_dists_torch, rho, sigma, n_obs, device
+    from ..external.umap_pytorch.fuzzy_gpu import fuzzy_simplicial_set_gpu
+
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+    knn_i = torch.as_tensor(knn_indices, dtype=torch.long, device=device)
+    knn_d = torch.as_tensor(knn_dists, dtype=torch.float32, device=device)
+
+    rows, cols, vals = fuzzy_simplicial_set_gpu(
+        knn_i,
+        knn_d,
+        n_neighbors=int(n_neighbors),
+        set_op_mix_ratio=float(set_op_mix_ratio),
+        local_connectivity=float(local_connectivity),
     )
-    
-    # 步骤4: 应用fuzzy set operations
-    if set_op_mix_ratio > 0:
-        membership_matrix = apply_set_operations(membership_matrix, set_op_mix_ratio)
-    
-    # 步骤5: 转换为scipy sparse matrix
-    return torch_sparse_to_scipy_optimized(membership_matrix)
 
-def compute_sigma_vectorized(
-    knn_dists: torch.Tensor,
-    rho: torch.Tensor,
-    local_connectivity: float,
-    device: str,
-    target_log: float = np.log2(15.0),
-    max_iter: int = 50,
-    tolerance: float = 1e-5
-) -> torch.Tensor:
-    """向量化的sigma计算，更快更稳定"""
-    n_samples = knn_dists.shape[0]
-    
-    # 初始化sigma搜索范围
-    sigma_low = torch.full((n_samples,), 1e-8, device=device)
-    sigma_high = torch.full((n_samples,), 1000.0, device=device)
-    
-    # 预计算归一化距离
-    rho_expanded = rho.unsqueeze(1)  # [n_samples, 1]
-    
-    for iteration in range(max_iter):
-        sigma_mid = (sigma_low + sigma_high) / 2.0
-        sigma_expanded = sigma_mid.unsqueeze(1)  # [n_samples, 1]
-        
-        # 计算所有样本的exp sum
-        normalized_dists = (knn_dists - rho_expanded) / sigma_expanded
-        # 裁剪避免数值溢出
-        normalized_dists = torch.clamp(normalized_dists, min=-50, max=50)
-        exp_sums = torch.sum(torch.exp(-normalized_dists), dim=1)
-        
-        # 向量化的二分搜索更新
-        too_high = exp_sums > target_log
-        too_low = exp_sums <= target_log
-        
-        sigma_high = torch.where(too_high, sigma_mid, sigma_high)
-        sigma_low = torch.where(too_low, sigma_mid, sigma_low)
-        
-        # 检查收敛
-        converged = torch.abs(exp_sums - target_log) < tolerance
-        if torch.all(converged):
-            break
-    
-    return (sigma_low + sigma_high) / 2.0
-
-def compute_membership_matrix(
-    knn_indices: torch.Tensor,
-    knn_dists: torch.Tensor,
-    rho: torch.Tensor,
-    sigma: torch.Tensor,
-    n_obs: int,
-    device: str
-) -> torch.sparse.FloatTensor:
-    """计算membership strength矩阵"""
-    n_neighbors = knn_indices.shape[1]
-    
-    # 创建索引
-    row_indices = torch.arange(n_obs, device=device).repeat_interleave(n_neighbors)
-    col_indices = knn_indices.flatten()
-    
-    # 计算membership values
-    rho_expanded = rho.unsqueeze(1).expand(-1, n_neighbors)
-    sigma_expanded = sigma.unsqueeze(1).expand(-1, n_neighbors)
-    
-    # 计算归一化距离
-    normalized_dists = (knn_dists - rho_expanded) / sigma_expanded
-    normalized_dists = torch.clamp(normalized_dists, min=-50, max=50)  # 避免数值溢出
-    
-    # 计算membership strengths
-    membership_vals = torch.exp(-normalized_dists).flatten()
-    
-    # 创建稀疏矩阵
-    indices = torch.stack([row_indices, col_indices])
-    sparse_matrix = torch.sparse_coo_tensor(
-        indices, membership_vals, (n_obs, n_obs), device=device
-    )
-    
-    return sparse_matrix.coalesce()
-
-def apply_set_operations(
-    membership_matrix: torch.sparse.FloatTensor,
-    set_op_mix_ratio: float
-) -> torch.sparse.FloatTensor:
-    """应用fuzzy set operations (union)"""
-    # 确保矩阵是coalesced的
-    membership_matrix = membership_matrix.coalesce()
-    
-    # 获取转置
-    membership_t = membership_matrix.t().coalesce()
-    
-    # 实现简化的fuzzy union
-    # 对于对称化，我们取max(A[i,j], A[j,i])
-    
-    # 方法：将原矩阵和转置矩阵相加，然后处理重复项
-    all_indices = torch.cat([membership_matrix.indices(), membership_t.indices()], dim=1)
-    all_values = torch.cat([membership_matrix.values(), membership_t.values()])
-    
-    # 创建联合矩阵
-    union_matrix = torch.sparse_coo_tensor(
-        all_indices, all_values, membership_matrix.shape, device=membership_matrix.device
-    ).coalesce()
-    
-    return union_matrix
-
-def torch_sparse_to_scipy_optimized(sparse_tensor: torch.sparse.FloatTensor) -> csr_matrix:
-    """优化的PyTorch稀疏张量到scipy转换"""
-    sparse_tensor = sparse_tensor.coalesce().cpu()
-    indices = sparse_tensor.indices().numpy()
-    values = sparse_tensor.values().numpy()
-    shape = sparse_tensor.shape
-    
-    # 直接创建CSR矩阵
-    coo = sparse.coo_matrix((values, (indices[0], indices[1])), shape=shape)
-    return coo.tocsr()
+    rows_np = rows.detach().cpu().numpy()
+    cols_np = cols.detach().cpu().numpy()
+    vals_np = vals.detach().cpu().numpy()
+    return sparse.coo_matrix((vals_np, (rows_np, cols_np)), shape=(n_obs, n_obs)).tocsr()

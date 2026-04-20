@@ -931,6 +931,20 @@ class Neighbors:
         `transformer` will be set like `umap` does (i.e. to a
         ~`pynndescent.PyNNDescentTransformer` with custom `n_trees` and `n_iter`).
         """
+        # If the caller asked for `method='torch'` and didn't pin the
+        # transformer themselves, default to the GPU chunked-matmul KNN
+        # (TorchKNNTransformer) so 'torch' actually means torch end-to-end.
+        # Other metrics, no-CUDA, or huge memory pressure still fall through
+        # to PyNNDescent below.
+        if (
+            method == "torch"
+            and transformer is None
+            and kwds["metric"] == "euclidean"
+            and TORCH_AVAILABLE
+            and torch.cuda.is_available()
+        ):
+            transformer = "pyg"
+
         # legacy logic
         use_dense_distances = (
             kwds["metric"] == "euclidean" and self._adata.n_obs < 8192

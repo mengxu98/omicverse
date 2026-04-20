@@ -5,6 +5,20 @@ import anndata
 from .._settings import add_reference,settings
 from .._registry import register_function
 from .._monitor import monitor
+from ..report._provenance import tracked, note
+
+
+# Per-method obsm key the integrated embedding lands in. Used by the
+# tracked() viz spec so the report's diagnostic plot is colored by
+# batch_key on the embedding the user just produced.
+_BATCH_OBSM = {
+    "harmony":   "X_pca_harmony",
+    "combat":    "X_combat",
+    "scanorama": "X_scanorama",
+    "scVI":      "X_scVI",
+    "CellANOVA": "X_cellanova",
+    "Concord":   "X_concord",
+}
 
 @monitor
 @register_function(
@@ -39,6 +53,7 @@ from .._monitor import monitor
     ],
     related=["pp.preprocess", "utils.mde", "utils.embedding"]
 )
+@tracked("batch_correction", "ov.single.batch_correction")
 def batch_correction(adata:anndata.AnnData,batch_key:str,
                      use_rep='scaled|original|X_pca',
                      methods:str='harmony',n_pcs:int=50,**kwargs)->anndata.AnnData:
@@ -70,6 +85,18 @@ def batch_correction(adata:anndata.AnnData,batch_key:str,
         and Concord object for ``'Concord'``. The integrated embeddings are
         written to ``adata.obsm``.
     """
+
+    # Declare the report's viz/backend up front from the static
+    # methods → obsm-key mapping. @tracked discards the entry on
+    # exception, so a method that fails mid-way never leaks a phantom
+    # entry pointing at an obsm key that was never written.
+    _basis = _BATCH_OBSM.get(methods)
+    if _basis is not None:
+        note(backend=f"omicverse · {methods}",
+             viz=[{"function": "ov.pl.embedding",
+                    "kwargs": {"basis": _basis,
+                                "color": batch_key,
+                                "frameon": "small"}}])
 
     from ..pp._qc import _is_oom
     _oom = _is_oom(adata)

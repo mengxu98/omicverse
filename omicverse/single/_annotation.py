@@ -14,6 +14,7 @@ import scanpy as sc
 
 from ..datasets import download_data
 from .._registry import register_function
+from ..report._provenance import tracked, note
 
 
 _PROMPT_DESCRIPTION_LIMIT = 400
@@ -373,6 +374,8 @@ class Annotation(object):
         self.last_reference_llm_raw: Optional[str] = None
         self.last_reference_prompt: Optional[str] = None
 
+    @tracked("Annotation.annotate", "ov.single.Annotation.annotate",
+             adata_attr="adata")
     def annotate(
         self,
         method='celltypist',
@@ -402,6 +405,17 @@ class Annotation(object):
         >>> anno.annotate(method='celltypist')
         >>> anno.annotate(method='gpt4celltype', cluster_key='leiden')
         """
+        # Predictions land deterministically at obs['<method>_prediction'].
+        # Declare the report's viz/backend up front; @tracked discards the
+        # entry on exception so failed calls never leak.
+        _pred_col = f"{method}_prediction"
+        note(backend=f"omicverse · method={method}",
+             viz=([{"function": "ov.pl.embedding",
+                     "kwargs": {"basis": "X_umap",
+                                "color": _pred_col,
+                                "frameon": "small"}}]
+                   if "X_umap" in self.adata.obsm else []))
+
         if method=='celltypist':
             import celltypist
             predictions = celltypist.annotate(

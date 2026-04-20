@@ -173,14 +173,15 @@ def note(**fields) -> None:
     entry.update(fields)
 
 
-def tracked(name: str, function: str):
+def tracked(name: str, function: str, *, adata_attr: Optional[str] = None):
     """Decorator for dispatchers that should appear in the pipeline report.
 
     Responsibilities covered here so the body doesn't have to:
 
     - Wall-clock timing (``duration_s``).
-    - kwargs capture into ``params`` (positional args beyond ``adata``
-      are bound via :func:`inspect.signature` so they show up by name).
+    - kwargs capture into ``params`` (positional args beyond ``adata`` /
+      ``self`` are bound via :func:`inspect.signature` so they show up
+      by name).
     - A thread-local stack that makes nested ``@tracked`` calls silent —
       only the outermost invocation writes a provenance entry. This is
       how e.g. ``ov.pp.qc`` internally invoking ``ov.pp.scrublet`` still
@@ -189,11 +190,18 @@ def tracked(name: str, function: str):
       staging entry is discarded.
 
     The body uses :func:`note` to populate ``backend`` / ``viz`` (and
-    anything else branch-dependent). Static defaults can be given via
-    this decorator if you prefer::
+    anything else branch-dependent).
+
+    Free functions::
 
         @tracked('scale', 'ov.pp.scale')
         def scale(adata, ...): ...
+
+    Class methods — pull adata from ``self.<adata_attr>``::
+
+        @tracked('Annotation.annotate', 'ov.single.Annotation.annotate',
+                 adata_attr='adata')
+        def annotate(self, method='celltypist', ...): ...
     """
 
     def decorator(fn):
@@ -212,9 +220,14 @@ def tracked(name: str, function: str):
                 n: v for n, v in zip(param_names, args[1:])
             }
             captured = {**positional, **kwargs}
-            adata_in = args[0] if args else kwargs.get("adata")
-            # Cell count BEFORE the step runs — lets the report summarise
-            # "cells X → Y" for filtering / QC steps.
+            # Resolve the AnnData to attach the entry to:
+            # - free function: args[0] (or `adata=` kwarg)
+            # - class method: getattr(self, adata_attr)
+            if adata_attr is None:
+                adata_in = args[0] if args else kwargs.get("adata")
+            else:
+                self_obj = args[0] if args else None
+                adata_in = getattr(self_obj, adata_attr, None)
             n_obs_before = getattr(adata_in, "n_obs", None)
             stack = _stack()
             stack.append({
@@ -234,9 +247,13 @@ def tracked(name: str, function: str):
             if stack:
                 # Nested call — the outermost @tracked owns the record.
                 return result
-            # Prefer the returned AnnData if the dispatcher uses copy-semantics.
-            target = (result if (result is not None and hasattr(result, "uns"))
-                      else adata_in)
+            # For free functions with copy-semantics, prefer the returned
+            # AnnData. For methods, the target is always the bound adata
+            # (returns are typically the model object, not the adata).
+            if adata_attr is None and result is not None and hasattr(result, "uns"):
+                target = result
+            else:
+                target = adata_in
             record_step(
                 target, entry["name"],
                 function=entry["function"],

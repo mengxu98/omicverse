@@ -4,6 +4,7 @@ import anndata as ad
 from anndata import AnnData
 import scanpy as sc
 from .._registry import register_function
+from ..report._provenance import tracked, note
 
 
 @register_function(
@@ -117,6 +118,8 @@ class AnnotationRef(object):
         scale(self.adata_new)
         pca(self.adata_new,layer='scaled',n_pcs=50)
 
+    @tracked("AnnotationRef.train", "ov.single.AnnotationRef.train",
+             adata_attr="adata_query")
     def train(
         self,method='harmony',
         **kwargs
@@ -140,6 +143,21 @@ class AnnotationRef(object):
         --------
         >>> ar.train(method='harmony')
         """
+        # train() builds an integrated embedding under a fixed obsm key
+        # (X_<method>_anno on the query). Declare viz/backend up front;
+        # nested batch_correction() is silenced by the @tracked stack.
+        _basis_for_train = {
+            "harmony":   "X_pca_harmony_anno",
+            "scVI":      "X_scVI_anno",
+            "scanorama": "X_scanorama_anno",
+        }.get(method)
+        if _basis_for_train is not None:
+            note(backend=f"AnnotationRef · {method}",
+                 viz=[{"function": "ov.pl.embedding",
+                        "kwargs": {"basis": _basis_for_train,
+                                    "color": "integrate_batch",
+                                    "frameon": "small"}}])
+
         from ._batch import batch_correction
         if method=='harmony':
             batch_correction(self.adata_new,batch_key='integrate_batch',methods='harmony',**kwargs)
@@ -160,6 +178,8 @@ class AnnotationRef(object):
             raise ValueError(f"Unsupported method: {method}")
         return self.adata_query
 
+    @tracked("AnnotationRef.predict", "ov.single.AnnotationRef.predict",
+             adata_attr="adata_query")
     def predict(self,method='harmony',n_neighbors=15,pred_key=None,uncert_key=None):
         """
         Transfer reference labels to query cells using weighted kNN.
@@ -184,6 +204,20 @@ class AnnotationRef(object):
         --------
         >>> adata_q = ar.predict(method='harmony', n_neighbors=15)
         """
+        # Resolve the obs columns the predict will write so the report's
+        # viz spec can be declared before the actual transfer runs.
+        _pred = pred_key or {
+            "harmony":   "harmony_prediction",
+            "scVI":      "scVI_prediction",
+            "scanorama": "scanorama_prediction",
+        }.get(method, f"{method}_prediction")
+        note(backend=f"AnnotationRef · method={method}",
+             viz=([{"function": "ov.pl.embedding",
+                     "kwargs": {"basis": "X_umap",
+                                 "color": _pred,
+                                 "frameon": "small"}}]
+                   if "X_umap" in self.adata_query.obsm else []))
+
         if method=='harmony':
             if pred_key is None:
                 pred_key='harmony_prediction'

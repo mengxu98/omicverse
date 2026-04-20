@@ -215,6 +215,83 @@ def test_tracked_captures_n_obs_change():
     assert prov[0]["n_obs_after"] == 8
 
 
+# ─────────────── @tracked on class methods (adata_attr) ──────────────────────
+
+
+def test_tracked_method_pulls_adata_from_self():
+    """``@tracked(adata_attr='adata')`` records on the AnnData held by
+    ``self``, not on ``args[0]`` (which is ``self`` itself)."""
+
+    class Annotator:
+        def __init__(self, adata):
+            self.adata = adata
+
+        @tracked("Annotator.annotate", "ov.x.Annotator.annotate",
+                 adata_attr="adata")
+        def annotate(self, *, method="celltypist"):
+            note(backend=f"omicverse · method={method}")
+
+    adata = _toy_adata()
+    Annotator(adata).annotate(method="celltypist")
+    prov = get_provenance(adata)
+    assert len(prov) == 1
+    e = prov[0]
+    assert e["name"] == "Annotator.annotate"
+    assert e["function"] == "ov.x.Annotator.annotate"
+    assert e["params"] == {"method": "celltypist"}
+    assert e["backend"] == "omicverse · method=celltypist"
+    assert e["n_obs_before"] == adata.n_obs
+    assert e["n_obs_after"] == adata.n_obs
+
+
+def test_tracked_method_uses_custom_adata_attr():
+    """``adata_attr`` can name any attribute (e.g. ``adata_query`` for
+    reference-based annotators)."""
+
+    class RefAnnotator:
+        def __init__(self, adata_query, adata_ref):
+            self.adata_query = adata_query
+            self.adata_ref = adata_ref
+
+        @tracked("RefAnnotator.predict", "ov.x.RefAnnotator.predict",
+                 adata_attr="adata_query")
+        def predict(self, *, method="harmony"):
+            note(backend=f"RefAnnotator · {method}")
+
+    query = _toy_adata()
+    reference = _toy_adata()
+    RefAnnotator(query, reference).predict(method="harmony")
+    # Entry lands on the query, not the reference.
+    assert len(get_provenance(query)) == 1
+    assert get_provenance(reference) == []
+
+
+def test_tracked_method_nested_inside_tracked_function_silent():
+    """A tracked free function calling a tracked class method (or vice
+    versa) still produces exactly one entry — outermost wins regardless
+    of which kind of dispatcher is on the stack."""
+
+    class _Inner:
+        def __init__(self, adata):
+            self.adata = adata
+
+        @tracked("inner.run", "ov.x.inner.run", adata_attr="adata")
+        def run(self):
+            note(backend="inner")
+
+    @tracked("outer", "ov.x.outer")
+    def outer(adata):
+        _Inner(adata).run()  # nested tracked method
+        note(backend="outer")
+
+    adata = _toy_adata()
+    outer(adata)
+    prov = get_provenance(adata)
+    assert len(prov) == 1
+    assert prov[0]["name"] == "outer"
+    assert prov[0]["backend"] == "outer"
+
+
 # ─────────────────────────── HTML rendering ───────────────────────────────────
 
 

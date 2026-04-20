@@ -22,8 +22,7 @@ from scipy.sparse import issparse
 from .._settings import settings,print_gpu_usage_color,EMOJI,add_reference,Colors
 from .._registry import register_function
 from .._monitor import monitor
-from ..report._provenance import record_step, tracks_depth
-import time as _ovtime
+from ..report._provenance import tracked, note
 
 
 # Local implementations to replace scanpy filtering functions
@@ -526,7 +525,7 @@ def _mt_mask(var_names, mt_startswith):
     ],
     related=["preprocess", "filter_cells", "filter_genes", "scrublet"]
 )
-@tracks_depth
+@tracked("qc", "ov.pp.qc")
 def qc(
     adata,
     *,
@@ -606,58 +605,39 @@ def qc(
     # only where needed.
     mixed_only = dict(use_gpu=use_gpu, batch_wise_mad=batch_wise_mad)
 
-    _t0 = _ovtime.time()
-    _resolved_backend = None
     if _is_oom(adata):
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['cpu']} Using CPU mode for QC (out-of-memory)...{Colors.ENDC}")
-        _result = qc_cpu(adata, **kwargs)
-        _resolved_backend = "cpu(oom)"
+        result = qc_cpu(adata, **kwargs)
+        note(backend=f"omicverse({settings.mode}) · cpu(oom) · mode={mode}")
     elif settings.mode == 'gpu':
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['gpu']} Using RAPIDS GPU to calculate QC...{Colors.ENDC}")
-        _result = qc_gpu(adata, **kwargs)
-        _resolved_backend = "rapids"
+        result = qc_gpu(adata, **kwargs)
+        note(backend=f"omicverse({settings.mode}) · rapids · mode={mode}")
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['mixed']} Using CPU/GPU mixed mode for QC...{Colors.ENDC}")
         print_gpu_usage_color()
-        _result = qc_cpu_gpu_mixed(adata, **kwargs, **mixed_only)
-        _resolved_backend = "mixed"
+        result = qc_cpu_gpu_mixed(adata, **kwargs, **mixed_only)
+        note(backend=f"omicverse({settings.mode}) · mixed · mode={mode}")
     else:
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['cpu']} Using CPU mode for QC...{Colors.ENDC}")
-        _result = qc_cpu(adata, **kwargs)
-        _resolved_backend = "cpu"
-    # Prefer the returned adata (qc typically returns the filtered one).
-    _target = _result if (_result is not None and hasattr(_result, "uns")) else adata
-    _qc_metrics = [c for c in ("nUMIs", "detected_genes", "mito_perc",
+        result = qc_cpu(adata, **kwargs)
+        note(backend=f"omicverse({settings.mode}) · cpu · mode={mode}")
+
+    # Build viz from whatever actually ended up on the (possibly filtered)
+    # AnnData. qc invokes a doublet backend internally; surface its plot
+    # here rather than let it leak as a phantom sub-entry.
+    target = result if (result is not None and hasattr(result, "uns")) else adata
+    qc_metrics = [c for c in ("nUMIs", "detected_genes", "mito_perc",
                                 "ribo_perc", "hb_perc", "doublet_score")
-                    if c in _target.obs.columns]
-    _viz = []
-    if _qc_metrics:
-        _viz.append({"function": "ov.pl.violin",
-                     "kwargs": {"keys": _qc_metrics}})
-    # qc invoked a doublet backend internally; surface its diagnostic plot
-    # in qc's own section rather than leaving a phantom sub-entry.
-    if doublets and "doublet_score" in _target.obs.columns:
-        _viz.append({"function": "ov.pl.doublet_score_histogram",
-                     "kwargs": {}})
-    record_step(
-        _target, "qc", function="ov.pp.qc",
-        params={"mode": mode, "min_cells": min_cells, "min_genes": min_genes,
-                "nmads": nmads, "max_cells_ratio": max_cells_ratio,
-                "max_genes_ratio": max_genes_ratio, "batch_key": batch_key,
-                "doublets": doublets, "doublets_method": doublets_method,
-                "filter_doublets": filter_doublets, "tresh": tresh,
-                "mt_startswith": mt_startswith, "mt_genes": mt_genes,
-                "ribo_startswith": list(ribo_startswith)
-                    if isinstance(ribo_startswith, tuple) else ribo_startswith,
-                "ribo_genes": ribo_genes, "hb_startswith": hb_startswith,
-                "hb_genes": hb_genes, "use_gpu": use_gpu,
-                "batch_wise_mad": batch_wise_mad, **kwargs},
-        backend=f"omicverse({settings.mode}) · {_resolved_backend} · mode={mode}"
-                + (f" + {doublets_method}" if doublets else ""),
-        duration_s=_ovtime.time() - _t0,
-        viz=_viz,
-    )
-    return _result
+                   if c in target.obs.columns]
+    viz = []
+    if qc_metrics:
+        viz.append({"function": "ov.pl.violin",
+                    "kwargs": {"keys": qc_metrics}})
+    if doublets and "doublet_score" in target.obs.columns:
+        viz.append({"function": "ov.pl.doublet_score_histogram", "kwargs": {}})
+    note(viz=viz)
+    return result
     
 
 def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',

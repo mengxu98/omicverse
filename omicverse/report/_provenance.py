@@ -1,96 +1,64 @@
 """Lightweight per-step provenance recorded into ``adata.uns``.
 
-Every tracked ``ov.*`` dispatcher appends a small dict to
-``adata.uns['_ov_provenance']``. The dict is the single source of truth
-for what the HTML report renders: function call, user-passed params,
-backend label, timing, plus a *declarative* list of visualisations that
-the dispatcher itself chose::
+The pipeline-report system is structured as a small, explicit contract
+between the dispatcher and the report:
 
-    {
-        "name":         canonical step key (qc, pca, neighbors, ...)
-        "function":     "ov.pp.qc"                # the public call path
-        "params":       {kwarg: value, ...}       # ONLY what the user passed
-        "backend":      "omicverse(cpu)" | "scrublet" | ...
-        "mode":         ov.settings.mode at call time
-        "timestamp":    ISO 8601
-        "duration_s":   wall time (seconds)
-        "version":      omicverse version
-        "n_obs_before": # cells when the call started
-        "n_obs_after":  # cells when the call returned
-        "viz":          [                          # 0 or more figures
-            {"function": "ov.pl.embedding",
-             "kwargs":   {"basis": "X_umap", "color": "leiden"}},
+    @tracked('umap', 'ov.pp.umap')
+    def umap(adata, **kwargs):
+        if settings.mode == 'cpu':
             ...
-        ],
-    }
+            note(backend='omicverse(cpu) · scanpy')
+        ...
+        note(viz=[{'function': 'ov.pl.embedding',
+                    'kwargs': {'basis': 'X_umap',
+                               'color': pick_color_key(adata)}}])
 
-Provenance is the *only* thing the report reads. If a step has no
-provenance entry, it did not run through an omicverse dispatcher — so it
-doesn't appear in the report. No heuristics, no guessing.
+* ``@tracked`` owns the infrastructure: timing, kwargs capture, the
+  thread-local nesting guard (so a ``tracked`` sub-call inside another
+  ``tracked`` body is silenced — the user-visible outer call owns the
+  record), and the call to :func:`record_step` at the end. Exceptions
+  are re-raised without recording.
+* :func:`note` lets the body annotate the currently-running tracked
+  call with branch-determined fields — typically ``backend`` and
+  ``viz``. It's a no-op outside a tracked body.
+* :func:`record_step` is still exposed as a low-level primitive for
+  callers who want to bypass the decorator.
 
-The storage is a dict-of-dicts keyed by a zero-padded index
-(``"000_qc"``, ``"001_umap"``, …) so it round-trips through h5ad
-cleanly.
+The recorded entry lives at ``adata.uns['_ov_provenance']`` as a
+dict-of-dicts keyed ``"000_qc"``, ``"001_umap"``, …; the ``viz``
+list-of-dicts is JSON-encoded on write so the whole log round-trips
+through h5ad cleanly.
 """
 from __future__ import annotations
 
 import datetime
 import functools
+import inspect
 import json
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Iterable, Optional, Union
-
-# Thread-local depth counter. A dispatcher wraps its body in ``with tracked():``
-# so that sub-calls to other tracked dispatchers see depth > 1 and their
-# record_step() is a no-op. The report should reflect what the user
-# actually typed, not every library-internal hop.
-_state = threading.local()
-
-
-def _depth() -> int:
-    return getattr(_state, "depth", 0)
-
-
-@contextmanager
-def tracked():
-    """Mark the enclosed block as a user-level tracked call.
-
-    Nested invocations increment a thread-local counter; ``record_step``
-    checks it and skips recording when depth > 1 (i.e. we're inside
-    another tracked call). Exceptions still decrement the counter.
-    """
-    prev = _depth()
-    _state.depth = prev + 1
-    try:
-        yield
-    finally:
-        _state.depth = prev
-
-
-def tracks_depth(fn):
-    """Function-decorator version of :func:`tracked`.
-
-    Wraps a dispatcher so that every call bumps the thread-local depth
-    counter for the duration of the body. Does *not* record — the
-    dispatcher still calls :func:`record_step` inline at the right
-    moment; the decorator only exists so that internal sub-calls to
-    other tracked dispatchers see depth > 1 and skip their own record.
-    """
-    @functools.wraps(fn)
-    def _wrapper(*args, **kwargs):
-        prev = _depth()
-        _state.depth = prev + 1
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            _state.depth = prev
-    return _wrapper
+from typing import Any, Iterable, Optional
 
 PROVENANCE_KEY = "_ov_provenance"
 
 _PRIMITIVE = (str, int, float, bool, type(None))
+
+# Thread-local stack of currently-running tracked entries. The outermost
+# entry corresponds to the user's direct call; anything below is a
+# library-internal sub-call that must not emit its own record.
+_state = threading.local()
+
+
+def _stack() -> list:
+    stack = getattr(_state, "stack", None)
+    if stack is None:
+        _state.stack = []
+        stack = _state.stack
+    return stack
+
+
+# ─────────────────────────── serialisation helpers ────────────────────────────
 
 
 def _coerce(v: Any) -> Any:
@@ -127,6 +95,9 @@ def _settings_mode() -> str:
         return ""
 
 
+# ────────────────────────── low-level primitive ───────────────────────────────
+
+
 def record_step(
     adata,
     name: str,
@@ -141,18 +112,9 @@ def record_step(
 ) -> None:
     """Append a provenance entry to ``adata.uns['_ov_provenance']``.
 
-    ``viz`` is a list of ``{"function": "ov.pl.<fn>", "kwargs": {...}}``
-    dicts the caller wants the report to render. Every dispatcher knows
-    best what to visualise for its own output, so it ships its viz spec
-    alongside the call record — the report system is then a dumb
-    executor, not a guesser.
-
-    Best-effort: failures here never crash the user's pipeline.
+    Best-effort: failures here never crash the user's pipeline. Most
+    callers should use :func:`tracked` + :func:`note` instead.
     """
-    # Skip when we're inside another tracked dispatcher — the outer one
-    # is the user-visible call, so it owns the record.
-    if _depth() > 1:
-        return
     try:
         if adata is None or not hasattr(adata, "uns"):
             return
@@ -166,9 +128,10 @@ def record_step(
             "duration_s": float(duration_s) if duration_s is not None else None,
             "version": _omicverse_version(),
             "n_obs_before": int(n_obs_before) if n_obs_before is not None else None,
-            "n_obs_after": int(n_obs_after) if n_obs_after is not None else int(adata.n_obs),
-            # viz is list-of-dicts; h5ad can't store that so serialise to a
-            # JSON string. get_provenance() decodes back.
+            "n_obs_after": int(n_obs_after) if n_obs_after is not None
+                            else int(adata.n_obs),
+            # viz is a list-of-dicts; h5ad can't persist that natively, so
+            # JSON-encode. get_provenance() decodes back.
             "viz": json.dumps(_coerce(viz or []), default=str),
         }
         log = dict(adata.uns.get(PROVENANCE_KEY, {}) or {})
@@ -181,40 +144,106 @@ def record_step(
         pass
 
 
-@contextmanager
-def track(adata, name: str, *, function: str, params: Optional[dict] = None,
-          backend: str = "", viz: Optional[list[dict]] = None):
-    """Context manager that times the wrapped block and records a step.
+# ──────────────────────── high-level decorator + note ─────────────────────────
 
-    ``viz`` may be either a literal list of dicts or a callable
-    ``(adata) -> list[dict]`` — the callable form is resolved at exit
-    time so you can reference state that only exists after the step ran
-    (e.g. a cluster label that doesn't exist yet at entry).
+
+def note(**fields) -> None:
+    """Annotate the currently-running ``@tracked`` call with extra fields.
+
+    Typical uses inside a dispatcher body::
+
+        note(backend='omicverse(cpu) · scanpy')
+        note(viz=[{'function': 'ov.pl.embedding', 'kwargs': {...}}])
+        note(params={**kwargs, 'forwarded': True})   # override defaults
+
+    No-op when called outside any ``@tracked`` body — safe to sprinkle in
+    helpers that are sometimes called directly.
     """
-    n_before = getattr(adata, "n_obs", None)
-    t0 = time.time()
-    try:
-        yield
-    finally:
-        if callable(viz):
+    stack = getattr(_state, "stack", None)
+    if not stack:
+        return
+    stack[-1].update(fields)
+
+
+def tracked(name: str, function: str):
+    """Decorator for dispatchers that should appear in the pipeline report.
+
+    Responsibilities covered here so the body doesn't have to:
+
+    - Wall-clock timing (``duration_s``).
+    - kwargs capture into ``params`` (positional args beyond ``adata``
+      are bound via :func:`inspect.signature` so they show up by name).
+    - A thread-local stack that makes nested ``@tracked`` calls silent —
+      only the outermost invocation writes a provenance entry. This is
+      how e.g. ``ov.pp.qc`` internally invoking ``ov.pp.scrublet`` still
+      yields a single ``qc`` entry.
+    - Success-only recording: if the wrapped function raises, the
+      staging entry is discarded.
+
+    The body uses :func:`note` to populate ``backend`` / ``viz`` (and
+    anything else branch-dependent). Static defaults can be given via
+    this decorator if you prefer::
+
+        @tracked('scale', 'ov.pp.scale')
+        def scale(adata, ...): ...
+    """
+
+    def decorator(fn):
+        sig = inspect.signature(fn)
+        param_names = [
+            n for n, p in sig.parameters.items()
+            if n not in ("adata", "self", "data")
+            and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+        ]
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            # Capture kwargs the user actually passed (no defaults filled
+            # in), plus any positional extras matched by parameter name.
+            positional = {
+                n: v for n, v in zip(param_names, args[1:])
+            }
+            captured = {**positional, **kwargs}
+            stack = _stack()
+            stack.append({
+                "name": name,
+                "function": function,
+                "params": captured,
+                "backend": "",
+                "viz": [],
+            })
+            t0 = time.time()
             try:
-                viz_resolved = viz(adata)
-            except Exception:  # noqa: BLE001
-                viz_resolved = []
-        else:
-            viz_resolved = viz
-        record_step(
-            adata, name,
-            function=function, params=params, backend=backend,
-            duration_s=time.time() - t0,
-            n_obs_before=n_before,
-            n_obs_after=getattr(adata, "n_obs", None),
-            viz=viz_resolved,
-        )
+                result = fn(*args, **kwargs)
+            except Exception:
+                stack.pop()
+                raise
+            entry = stack.pop()
+            if stack:
+                # Nested call — the outermost @tracked owns the record.
+                return result
+            # Prefer the returned AnnData if the dispatcher uses copy-semantics.
+            target = (result if (result is not None and hasattr(result, "uns"))
+                      else (args[0] if args else kwargs.get("adata")))
+            record_step(
+                target, entry["name"],
+                function=entry["function"],
+                params=entry["params"],
+                backend=entry["backend"],
+                duration_s=time.time() - t0,
+                viz=entry["viz"],
+            )
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# ────────────────────────── read-side helpers ─────────────────────────────────
 
 
 def _decode_entry(entry: dict) -> dict:
-    """Decode JSON-encoded fields like ``viz`` back to Python objects."""
     if not isinstance(entry, dict):
         return entry
     out = dict(entry)
@@ -247,62 +276,11 @@ def clear_provenance(adata) -> None:
         del adata.uns[PROVENANCE_KEY]
 
 
-def tracked_step(
-    name: str,
-    function: str,
-    *,
-    backend: Union[str, Callable] = "omicverse",
-    viz: Union[list, Callable] = (),
-):
-    """Decorator: record provenance when this dispatcher runs.
-
-    Only captures keyword args the user actually passed — positional
-    args beyond ``adata`` are not introspected. ``backend`` and ``viz``
-    may be callables ``(adata, kwargs) -> value`` resolved at call time.
-
-    Usage::
-
-        @tracked_step(name='umap', function='ov.pp.umap',
-                      backend=lambda a, kw: f'omicverse({_settings_mode()})',
-                      viz=lambda a, kw: [{'function': 'ov.pl.embedding',
-                                           'kwargs': {...}}])
-        def umap(adata, **kwargs):
-            ...
-    """
-    def decorator(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            adata_in = args[0] if args else kwargs.get("adata")
-            t0 = time.time()
-            result = fn(*args, **kwargs)
-            # `copy=True` dispatchers return a new adata — prefer that target.
-            target = result if (result is not None and hasattr(result, "uns")) \
-                              else adata_in
-            try:
-                backend_str = backend(target, kwargs) if callable(backend) else str(backend)
-            except Exception:  # noqa: BLE001
-                backend_str = str(backend) if not callable(backend) else "omicverse"
-            try:
-                viz_list = viz(target, kwargs) if callable(viz) else list(viz)
-            except Exception:  # noqa: BLE001
-                viz_list = []
-            # Drop kwargs that typically just say "please return a copy" —
-            # they don't describe the step, they describe the caller.
-            recorded = {k: v for k, v in kwargs.items()
-                        if k not in ("copy", "inplace")}
-            record_step(target, name, function=function,
-                         params=recorded, backend=backend_str,
-                         duration_s=time.time() - t0, viz=viz_list)
-            return result
-        return wrapper
-    return decorator
-
-
 def pick_color_key(adata, preference: Optional[Iterable[str]] = None) -> Optional[str]:
-    """Helper for dispatchers' viz specs: first existing obs column.
+    """First present obs column among the preference list.
 
-    Used when declaring an ``ov.pl.embedding`` viz whose ``color`` should
-    default to the most informative labeling already on the AnnData.
+    Helper for building ``ov.pl.embedding`` viz specs that default to
+    the most informative labeling on the AnnData.
     """
     candidates = list(preference or ("cell_type", "leiden", "louvain",
                                       "cluster", "phase"))
@@ -310,3 +288,25 @@ def pick_color_key(adata, preference: Optional[Iterable[str]] = None) -> Optiona
         if k in adata.obs.columns:
             return k
     return None
+
+
+# ──────────────── legacy / deprecated (kept for external callers) ─────────────
+
+
+@contextmanager
+def track(adata, name: str, *, function: str,
+          params: Optional[dict] = None, backend: str = "",
+          viz: Optional[list[dict]] = None):
+    """Context-manager form — prefer :func:`tracked` + :func:`note` instead."""
+    n_before = getattr(adata, "n_obs", None)
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        record_step(
+            adata, name, function=function, params=params, backend=backend,
+            duration_s=time.time() - t0,
+            n_obs_before=n_before,
+            n_obs_after=getattr(adata, "n_obs", None),
+            viz=viz,
+        )

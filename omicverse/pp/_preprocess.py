@@ -23,8 +23,7 @@ from ._normalization import normalize_total,log1p
 from datetime import datetime
 
 from .._monitor import monitor
-from ..report._provenance import record_step, pick_color_key, tracks_depth
-import time as _ovtime
+from ..report._provenance import tracked, note, pick_color_key
 
 
 # Helper functions for Rust anndata compatibility
@@ -630,7 +629,7 @@ def anndata_to_CPU(adata,layer=None, convert_all=True, copy=False):
     ],
     related=["qc", "normalize", "scale", "pca", "highly_variable_genes"]
 )
-@tracks_depth
+@tracked("preprocess", "ov.pp.preprocess")
 def preprocess(
     adata, mode='shiftlog|pearson', 
     target_sum=50*1e4, n_HVGs=2000,
@@ -659,7 +658,6 @@ def preprocess(
         adata: The preprocessed data matrix.
     """
 
-    _t0_preprocess = _ovtime.time()
     # Track the original object so we can propagate changes even if callers
     # forget to use the returned value.
     original_adata = adata
@@ -875,16 +873,9 @@ def preprocess(
         original_adata.__dict__.update(adata.__dict__)
         adata = original_adata
 
-    record_step(
-        adata, "preprocess", function="ov.pp.preprocess",
-        params={"mode": mode, "target_sum": target_sum, "n_HVGs": n_HVGs,
-                "organism": organism, "no_cc": no_cc, "batch_key": batch_key,
-                "identify_robust": identify_robust},
-        backend=f"omicverse({settings.mode})",
-        duration_s=_ovtime.time() - _t0_preprocess,
-        viz=([{"function": "ov.pl.highly_variable_genes_scatter", "kwargs": {}}]
-             if "highly_variable" in adata.var.columns else []),
-    )
+    note(backend=f"omicverse({settings.mode}) · mode={mode}")
+    if "highly_variable" in adata.var.columns:
+        note(viz=[{"function": "ov.pl.highly_variable_genes_scatter", "kwargs": {}}])
     return adata
 
 @register_function(
@@ -968,7 +959,7 @@ def normalize_pearson_residuals(
     ],
     related=["highly_variable_features", "normalize_pearson_residuals", "pca"],
 )
-@tracks_depth
+@tracked("highly_variable_genes", "ov.pp.highly_variable_genes")
 def highly_variable_genes(
     adata,
     *,
@@ -1034,8 +1025,7 @@ def highly_variable_genes(
     import numpy as np
     if max_disp is None:
         max_disp = np.inf
-    _t0 = _ovtime.time()
-    _result = _hvg(
+    result = _hvg(
         adata, layer=layer, n_top_genes=n_top_genes,
         min_disp=min_disp, max_disp=max_disp, min_mean=min_mean,
         max_mean=max_mean, span=span, n_bins=n_bins, flavor=flavor,
@@ -1043,21 +1033,9 @@ def highly_variable_genes(
         filter_unexpressed_genes=filter_unexpressed_genes,
         check_values=check_values, **kwargs,
     )
-    record_step(
-        adata, "highly_variable_genes",
-        function="ov.pp.highly_variable_genes",
-        params={"layer": layer, "n_top_genes": n_top_genes,
-                "min_disp": min_disp, "max_disp": max_disp,
-                "min_mean": min_mean, "max_mean": max_mean,
-                "span": span, "n_bins": n_bins, "flavor": flavor,
-                "subset": subset, "batch_key": batch_key,
-                "filter_unexpressed_genes": filter_unexpressed_genes,
-                "check_values": check_values, **kwargs},
-        backend=f"omicverse · flavor={flavor}",
-        duration_s=_ovtime.time() - _t0,
-        viz=[{"function": "ov.pl.highly_variable_genes_scatter", "kwargs": {}}],
-    )
-    return _result
+    note(backend=f"omicverse · flavor={flavor}",
+         viz=[{"function": "ov.pl.highly_variable_genes_scatter", "kwargs": {}}])
+    return result
 
 @monitor
 @register_function(
@@ -1075,7 +1053,7 @@ def highly_variable_genes(
     examples=["ov.pp.scale(adata, max_value=10)", "ov.pp.scale(adata, max_value=10, to_sparse=True)"],
     related=["normalize", "regress"]
 )
-@tracks_depth
+@tracked("scale", "ov.pp.scale")
 def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
     """
     Scale the input AnnData object.
@@ -1104,7 +1082,6 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
         >>> ov.pp.scale(adata, max_value=10, to_sparse=False)
     """
     from ._qc import _is_oom
-    _t0 = _ovtime.time()
     if _is_oom(adata):
         # chunked_scale hard-codes the layer name to 'scaled' and installs a
         # lazy ScaledBackedArray. Re-wrapping/materialising it defeats the
@@ -1120,12 +1097,7 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
             adata.uns["status"] = {}
         add_reference(adata, "scanpy", "scaling with scanpy")
         adata.uns["status"]["scaled"] = True
-        record_step(
-            adata, "scale", function="ov.pp.scale",
-            params={"max_value": max_value, "layers_add": layers_add,
-                    "to_sparse": to_sparse, **kwargs},
-            backend=f"omicverse({settings.mode}) · oom",
-            duration_s=_ovtime.time() - _t0, viz=[])
+        note(backend=f"omicverse({settings.mode}) · oom")
         return
     if settings.mode == 'cpu' or settings.mode == 'cpu-gpu-mixed':
         from ._scale import scale_anndata as scale
@@ -1154,12 +1126,7 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
         adata.uns['status_args'] = {}
     add_reference(adata,'scanpy','scaling with scanpy')
     adata.uns['status']['scaled'] = True
-    record_step(
-        adata, "scale", function="ov.pp.scale",
-        params={"max_value": max_value, "layers_add": layers_add,
-                "to_sparse": to_sparse, **kwargs},
-        backend=f"omicverse({settings.mode})",
-        duration_s=_ovtime.time() - _t0, viz=[])
+    note(backend=f"omicverse({settings.mode})")
 
 @monitor
 @register_function(
@@ -1313,7 +1280,7 @@ class my_PCA:
     examples=["ov.pp.pca(adata, n_pcs=50)"],
     related=["umap", "tsne", "mde"]
 )
-@tracks_depth
+@tracked("pca", "ov.pp.pca")
 def pca(adata, n_pcs=50, layer='scaled',inplace=True,**kwargs):
     """
     Performs Principal Component Analysis (PCA) on the data stored in a scanpy AnnData object.
@@ -1332,7 +1299,6 @@ def pca(adata, n_pcs=50, layer='scaled',inplace=True,**kwargs):
         and other information stored in its `obsm`, `varm`,
             and `uns` fields.
     """
-    _t0 = _ovtime.time()
     #if 'lognorm' not in adata.layers:
     #    adata.layers['lognorm'] = adata.X
     if layer in adata.layers:
@@ -1386,14 +1352,9 @@ def pca(adata, n_pcs=50, layer='scaled',inplace=True,**kwargs):
         'n_pcs':n_pcs,
     }
     add_reference(adata,'scanpy','PCA with scanpy')
-    record_step(
-        adata, "pca", function="ov.pp.pca",
-        params={"n_pcs": n_pcs, "layer": layer, "inplace": inplace, **kwargs},
-        backend=f"omicverse({settings.mode})",
-        duration_s=_ovtime.time() - _t0,
-        viz=[{"function": "ov.pl.plot_pca_variance_ratio",
-               "kwargs": {"n_pcs": min(30, int(n_pcs or 50))}}],
-    )
+    note(backend=f"omicverse({settings.mode})",
+         viz=[{"function": "ov.pl.plot_pca_variance_ratio",
+                "kwargs": {"n_pcs": min(30, int(n_pcs or 50))}}])
     if inplace:
         return None
     else:
@@ -1509,7 +1470,7 @@ from types import MappingProxyType
     examples=["ov.pp.neighbors(adata, n_neighbors=15)"],
     related=["umap", "leiden", "louvain"]
 )
-@tracks_depth
+@tracked("neighbors", "ov.pp.neighbors")
 def neighbors(
     adata: anndata.AnnData,
     n_neighbors: int = 15,
@@ -1588,8 +1549,6 @@ def neighbors(
     
     """
     # Ensure PCA exists; compute a default if missing so downstream code can proceed
-    _t0 = _ovtime.time()
-
     if settings.mode =='cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU to calculate neighbors...")
         from ._neighbors import neighbors as _neighbors
@@ -1617,18 +1576,8 @@ def neighbors(
                          metric_kwds=metric_kwds,
                          key_added=key_added,copy=copy,**kwargs)
     add_reference(adata,'scanpy','neighbors with scanpy')
-    record_step(
-        adata, "neighbors", function="ov.pp.neighbors",
-        params={"n_neighbors": n_neighbors, "n_pcs": n_pcs,
-                "use_rep": use_rep, "knn": knn,
-                "random_state": random_state, "n_jobs": n_jobs,
-                "method": method, "transformer": transformer,
-                "metric": metric, "metric_kwds": dict(metric_kwds),
-                "key_added": key_added, **kwargs},
-        backend=f"omicverse({settings.mode}) · method={method}",
-        duration_s=_ovtime.time() - _t0,
-        viz=[{"function": "ov.pl.neighbor_degree_histogram", "kwargs": {}}],
-    )
+    note(backend=f"omicverse({settings.mode}) · method={method}",
+         viz=[{"function": "ov.pl.neighbor_degree_histogram", "kwargs": {}}])
 
 @monitor
 @register_function(
@@ -1650,7 +1599,7 @@ def neighbors(
     examples=["ov.pp.umap(adata)"],
     related=["tsne", "pca", "mde", "neighbors"]
 )
-@tracks_depth
+@tracked("umap", "ov.pp.umap")
 def umap(
     adata,
     *,
@@ -1744,51 +1693,39 @@ def umap(
         forward["key_added"] = key_added
     forward.update(kwargs)
     kwargs = forward
-    _t0 = _ovtime.time()
-    _resolved_backend = None
     print(f"{EMOJI['start']} [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running UMAP in '{settings.mode}' mode...")
     try:
         if settings.mode == 'cpu':
             print(f"{EMOJI['cpu']} Using Scanpy CPU UMAP...")
             from ._umap import umap as _umap
             _umap(adata, **kwargs)
-            add_reference(adata,'umap','UMAP with scanpy')
-            _resolved_backend = "scanpy"
-
+            add_reference(adata, 'umap', 'UMAP with scanpy')
+            note(backend=f"omicverse({settings.mode}) · scanpy")
         elif settings.mode == 'cpu-gpu-mixed':
             print(f"{EMOJI['gpu']} Using torch GPU to calculate UMAP...")
             print_gpu_usage_color()
             from ._umap import umap as _umap
-            _umap(adata,method='pumap', **kwargs)
-            add_reference(adata,'umap','UMAP with pumap')
-            _resolved_backend = "pumap"
+            _umap(adata, method='pumap', **kwargs)
+            add_reference(adata, 'umap', 'UMAP with pumap')
+            note(backend=f"omicverse({settings.mode}) · pumap")
         else:
             try:
                 print(f"{EMOJI['gpu']} Using RAPIDS GPU UMAP...")
                 import rapids_singlecell as rsc
                 rsc.tl.umap(adata, **kwargs)
-                add_reference(adata,'umap','UMAP with RAPIDS')
-                _resolved_backend = "rapids"
+                add_reference(adata, 'umap', 'UMAP with RAPIDS')
+                note(backend=f"omicverse({settings.mode}) · rapids")
             except Exception as e:
                 print(f"{EMOJI['error']} RAPIDS GPU UMAP failed: {e}")
                 print(f"{EMOJI['error']} Using pumap instead...")
                 from ._umap import umap as _umap
-                _umap(adata,method='pumap', **kwargs)
-                _resolved_backend = "pumap"
-                #add_reference(adata,'pumap','UMAP with pumap')
-
+                _umap(adata, method='pumap', **kwargs)
+                note(backend=f"omicverse({settings.mode}) · pumap")
+        note(viz=[{"function": "ov.pl.embedding",
+                    "kwargs": {"basis": "X_umap",
+                               "color": pick_color_key(adata),
+                               "frameon": "small"}}])
         print(f"{EMOJI['done']} UMAP completed successfully.")
-
-        record_step(
-            adata, "umap", function="ov.pp.umap",
-            params=kwargs,
-            backend=f"omicverse({settings.mode}) · {_resolved_backend}",
-            duration_s=_ovtime.time() - _t0,
-            viz=[{"function": "ov.pl.embedding",
-                  "kwargs": {"basis": "X_umap",
-                             "color": pick_color_key(adata),
-                             "frameon": "small"}}],
-        )
     except Exception as e:
         print(f"{EMOJI['error']} UMAP failed: {e}")
         raise
@@ -1816,7 +1753,7 @@ def umap(
     ],
     related=["leiden", "neighbors", "umap"],
 )
-@tracks_depth
+@tracked("louvain", "ov.pp.louvain")
 def louvain(
     adata,
     resolution=None,
@@ -1859,7 +1796,6 @@ def louvain(
     improvement). Labels are still written to ``adata.obs[key_added]`` so
     existing notebooks keep working.
     """
-    _t0 = _ovtime.time()
     if resolution is not None:
         kwargs["resolution"] = resolution
     kwargs.setdefault("random_state", random_state)
@@ -1906,37 +1842,24 @@ def louvain(
         print(f"{EMOJI['mixed']} cpu-gpu-mixed: louvain auto-routed to GPU Leiden (deprecation)")
         leiden(adata, key_added=key_added, **safe_kwargs)
         return
-    _resolved_backend = None
     if settings.mode == 'cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU Louvain...")
         sc.tl.louvain(adata, **kwargs)
-        add_reference(adata,'louvain','Louvain clustering with scanpy')
-        _resolved_backend = "scanpy"
+        add_reference(adata, 'louvain', 'Louvain clustering with scanpy')
+        note(backend=f"omicverse({settings.mode}) · scanpy")
     else:
         print(f"{EMOJI['gpu']} Using RAPIDS GPU to calculate Louvain...")
         import rapids_singlecell as rsc
         rsc.tl.louvain(adata, **kwargs)
-        add_reference(adata,'louvain','Louvain clustering with RAPIDS')
-        _resolved_backend = "rapids"
-    record_step(
-        adata, "louvain", function="ov.pp.louvain",
-        params={"resolution": resolution, "random_state": random_state,
-                "key_added": key_added, "neighbors_key": neighbors_key,
-                "directed": directed, "use_weights": use_weights,
-                "copy": copy, **{k: v for k, v in kwargs.items()
-                                  if k not in ("resolution", "random_state",
-                                                "key_added", "neighbors_key",
-                                                "directed", "use_weights", "copy")}},
-        backend=f"omicverse({settings.mode}) · {_resolved_backend}",
-        duration_s=_ovtime.time() - _t0,
-        viz=[
-            {"function": "ov.pl.cluster_sizes_bar",
-             "kwargs": {"groupby": key_added}},
-            *([{"function": "ov.pl.embedding",
-                "kwargs": {"basis": "X_umap", "color": key_added,
-                           "frameon": "small"}}] if "X_umap" in adata.obsm else []),
-        ],
-    )
+        add_reference(adata, 'louvain', 'Louvain clustering with RAPIDS')
+        note(backend=f"omicverse({settings.mode}) · rapids")
+    note(viz=[
+        {"function": "ov.pl.cluster_sizes_bar",
+          "kwargs": {"groupby": key_added}},
+        *([{"function": "ov.pl.embedding",
+             "kwargs": {"basis": "X_umap", "color": key_added,
+                        "frameon": "small"}}] if "X_umap" in adata.obsm else []),
+    ])
 
 @monitor
 @register_function(
@@ -1958,65 +1881,51 @@ def louvain(
     examples=["ov.pp.leiden(adata, resolution=1.0)"],
     related=["louvain", "neighbors"]
 )
-@tracks_depth
+@tracked("leiden", "ov.pp.leiden")
 def leiden(
     adata, resolution=1.0, random_state=0,
     key_added='leiden', local_iterations=100, max_levels=10, device=None, symmetrize=None, **kwargs):
     '''
     leiden clustering
     '''
-    _t0 = _ovtime.time()
-    _resolved_backend = None
-    if settings.mode =='cpu':
+    if settings.mode == 'cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU Leiden...")
-        #sc.tl.leiden(adata, **kwargs)
         from ._leiden import leiden as _leiden
         _leiden(adata, resolution=resolution, random_state=random_state,
-            key_added=key_added,**kwargs)
-        add_reference(adata,'leiden','Leiden clustering with scanpy')
-        _resolved_backend = "scanpy"
+            key_added=key_added, **kwargs)
+        add_reference(adata, 'leiden', 'Leiden clustering with scanpy')
+        note(backend=f"omicverse({settings.mode}) · scanpy")
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{EMOJI['mixed']} Using torch CPU/GPU mixed mode to calculate Leiden...")
         print_gpu_usage_color()
         from ._leiden_gpu import leiden_gpu_sparse_multilevel as _leiden
-
         _leiden(
             adata,
             resolution=resolution,
             random_state=random_state,
             key_added=key_added,
-            # your API uses these names:
             local_iterations=local_iterations,
             max_levels=max_levels,
-            device=device,  # None -> auto-pick
+            device=device,
             symmetrize=symmetrize,
-            **kwargs
+            **kwargs,
         )
-        add_reference(adata,'leiden','Leiden clustering with omicverse')
-        _resolved_backend = "torch"
+        add_reference(adata, 'leiden', 'Leiden clustering with omicverse')
+        note(backend=f"omicverse({settings.mode}) · torch")
     else:
         print(f"{EMOJI['gpu']} Using RAPIDS GPU to calculate Leiden...")
         import rapids_singlecell as rsc
         rsc.tl.leiden(adata, resolution=resolution, random_state=random_state,
-            key_added=key_added,**kwargs)
-        add_reference(adata,'leiden','Leiden clustering with RAPIDS')
-        _resolved_backend = "rapids"
-    record_step(
-        adata, "leiden", function="ov.pp.leiden",
-        params={"resolution": resolution, "random_state": random_state,
-                "key_added": key_added, "local_iterations": local_iterations,
-                "max_levels": max_levels, "device": device,
-                "symmetrize": symmetrize, **kwargs},
-        backend=f"omicverse({settings.mode}) · {_resolved_backend}",
-        duration_s=_ovtime.time() - _t0,
-        viz=[
-            {"function": "ov.pl.cluster_sizes_bar",
-              "kwargs": {"groupby": key_added}},
-            *([{"function": "ov.pl.embedding",
-                 "kwargs": {"basis": "X_umap", "color": key_added,
-                            "frameon": "small"}}] if "X_umap" in adata.obsm else []),
-        ],
-    )
+            key_added=key_added, **kwargs)
+        add_reference(adata, 'leiden', 'Leiden clustering with RAPIDS')
+        note(backend=f"omicverse({settings.mode}) · rapids")
+    note(viz=[
+        {"function": "ov.pl.cluster_sizes_bar",
+          "kwargs": {"groupby": key_added}},
+        *([{"function": "ov.pl.embedding",
+             "kwargs": {"basis": "X_umap", "color": key_added,
+                        "frameon": "small"}}] if "X_umap" in adata.obsm else []),
+    ])
 
 @monitor
 @register_function(
@@ -2049,7 +1958,7 @@ def leiden(
     result_keys_obs=['S_score', 'G2M_score', 'phase'],
     result_keys_uns=['*'],
 )
-@tracks_depth
+@tracked("score_genes_cell_cycle", "ov.pp.score_genes_cell_cycle")
 def score_genes_cell_cycle(adata,species='human',s_genes=None, g2m_genes=None):
     """Score cell cycle phases using predefined or custom gene sets.
 
@@ -2103,31 +2012,18 @@ def score_genes_cell_cycle(adata,species='human',s_genes=None, g2m_genes=None):
               'Mki67', 'Pimreg', 'Ccnb2', 'Tpx2', 'Hjurp', 'Anln', 'Kif2c',
                'Cenpe', 'Gtse1', 'Kif23', 'Cdc20', 'Ube2c', 'Cenpf', 'Cenpa',
                 'Hmmr', 'Ctcf', 'Psrc1', 'Cdc25c', 'Nek2', 'Gas2l3', 'G2e3']
-    _t0 = _ovtime.time()
-    sc.tl.score_genes_cell_cycle(adata,s_genes=s_genes, g2m_genes=g2m_genes)
+    sc.tl.score_genes_cell_cycle(adata, s_genes=s_genes, g2m_genes=g2m_genes)
     if 'status' not in adata.uns.keys():
         adata.uns['status'] = {}
     if 'status_args' not in adata.uns.keys():
         adata.uns['status_args'] = {}
-
     adata.uns['status']['cell_cycle'] = True
-    adata.uns['status_args']['cell_cycle']={
-        's_genes':s_genes,
-        'g2m_genes':g2m_genes
-    }
-    record_step(
-        adata, "score_genes_cell_cycle",
-        function="ov.pp.score_genes_cell_cycle",
-        params={"species": species,
-                "s_genes": list(s_genes) if s_genes is not None else None,
-                "g2m_genes": list(g2m_genes) if g2m_genes is not None else None},
-        backend="omicverse",
-        duration_s=_ovtime.time() - _t0,
-        viz=[{"function": "ov.pl.cluster_sizes_bar",
-              "kwargs": {"groupby": "phase",
-                          "title": "Cell cycle phase",
-                          "xlabel": "phase"}}],
-    )
+    adata.uns['status_args']['cell_cycle'] = {'s_genes': s_genes,
+                                               'g2m_genes': g2m_genes}
+    note(viz=[{"function": "ov.pl.cluster_sizes_bar",
+                "kwargs": {"groupby": "phase",
+                            "title": "Cell cycle phase",
+                            "xlabel": "phase"}}])
 
 @monitor
 @register_function(
@@ -2151,7 +2047,7 @@ def score_genes_cell_cycle(adata,species='human',s_genes=None, g2m_genes=None):
     ],
     related=["umap", "mde", "pca"],
 )
-@tracks_depth
+@tracked("tsne", "ov.pp.tsne")
 def tsne(
     adata,
     n_pcs=None,
@@ -2224,45 +2120,28 @@ def tsne(
     kwargs.setdefault("copy", copy)
     if n_iter is not None:
         kwargs.setdefault("n_iter", n_iter)
-    _t0 = _ovtime.time()
-    _resolved_backend = None
     if settings.mode == 'cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU t-SNE...")
         sc.tl.tsne(adata, **kwargs)
-        add_reference(adata,'tsne','t-SNE with scanpy')
-        _resolved_backend = "scanpy"
+        add_reference(adata, 'tsne', 't-SNE with scanpy')
+        note(backend=f"omicverse({settings.mode}) · scanpy")
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{EMOJI['mixed']} Using torch CPU/GPU mixed mode to calculate t-SNE...")
         print_gpu_usage_color()
         from ._tsne import tsne as _tsne
         _tsne(adata, **kwargs)
-        add_reference(adata,'tsne','t-SNE with omicverse')
-        _resolved_backend = "torch"
+        add_reference(adata, 'tsne', 't-SNE with omicverse')
+        note(backend=f"omicverse({settings.mode}) · torch")
     else:
         print(f"{EMOJI['gpu']} Using RAPIDS GPU to calculate t-SNE...")
         import rapids_singlecell as rsc
         rsc.tl.tsne(adata, **kwargs)
-        add_reference(adata,'tsne','t-SNE with RAPIDS')
-        _resolved_backend = "rapids"
-    record_step(
-        adata, "tsne", function="ov.pp.tsne",
-        params={"n_pcs": n_pcs, "n_components": n_components,
-                "use_rep": use_rep, "perplexity": perplexity, "metric": metric,
-                "early_exaggeration": early_exaggeration,
-                "learning_rate": learning_rate, "random_state": random_state,
-                "key_added": key_added, "n_iter": n_iter,
-                **{k: v for k, v in kwargs.items()
-                   if k not in ("n_pcs", "n_components", "use_rep",
-                                "perplexity", "metric", "early_exaggeration",
-                                "learning_rate", "random_state", "key_added",
-                                "n_iter", "copy")}},
-        backend=f"omicverse({settings.mode}) · {_resolved_backend}",
-        duration_s=_ovtime.time() - _t0,
-        viz=[{"function": "ov.pl.embedding",
-              "kwargs": {"basis": "X_tsne",
-                          "color": pick_color_key(adata),
-                          "frameon": "small"}}],
-    )
+        add_reference(adata, 'tsne', 't-SNE with RAPIDS')
+        note(backend=f"omicverse({settings.mode}) · rapids")
+    note(viz=[{"function": "ov.pl.embedding",
+                "kwargs": {"basis": "X_tsne",
+                            "color": pick_color_key(adata),
+                            "frameon": "small"}}])
 
 
 @register_function(

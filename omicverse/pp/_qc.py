@@ -404,6 +404,32 @@ def mads_test(meta, cov, nmads=5, lt=None, batch_key=None):
 _CE_MT_PREFIXES = ('ctc-', 'nduo-', 'ctb-')
 
 
+def _resolve_doublets_method(method: str) -> str:
+    """Resolve a doublets_method string, falling back gracefully when the
+    requested backend's package is not installed.
+
+    `scdblfinder` (default) requires `pyscdblfinder`; if it's missing we
+    print a single-line install hint and fall back to `scrublet` (which
+    has lazy imports of its own and is broadly available). Other methods
+    pass through unchanged — their wrappers raise their own ImportError
+    with installation instructions.
+    """
+    if method == 'scdblfinder':
+        try:
+            import pyscdblfinder  # noqa: F401
+        except ImportError:
+            print(
+                f"   {Colors.WARNING}⚠️  pyscdblfinder is not installed; "
+                f"falling back to 'scrublet'.{Colors.ENDC}"
+            )
+            print(
+                f"   {Colors.CYAN}💡 Install with: "
+                f"`pip install pyscdblfinder` to use the new default.{Colors.ENDC}"
+            )
+            return 'scrublet'
+    return method
+
+
 def _detect_mt_prefix(var_names) -> str:
     """Auto-detect mitochondrial gene prefix from variable names.
 
@@ -512,7 +538,7 @@ def qc(adata,**kwargs):
         max_genes_ratio : The maximum number of genes ratio for a cell to pass QC. Default is 1.
         nmads : The number of MADs to use for MADs filtering. Default is 5.
         doublets : Whether to perform doublet detection. Default is True.
-        doublets_method : The doublet detection method to use. Options are 'scrublet', 'sccomposite', 'doubletfinder', or 'scdblfinder'. Default is 'scrublet'.
+        doublets_method : The doublet detection method to use. Options are 'scrublet', 'sccomposite', 'doubletfinder', or 'scdblfinder'. Default is 'scdblfinder' (Python port of R scDblFinder; xgboost on kNN+cxds features) for `cpu` and `cpu-gpu-mixed` modes, falling back to 'scrublet' if pyscdblfinder is not installed. The RAPIDS `gpu` mode keeps 'scrublet' as default for backwards compatibility.
         filter_doublets : Whether to filter out doublets (True) or just flag them (False). Default is True.
         path_viz : The path to save the QC plots. Default is None.
         tresh : A dictionary of QC thresholds. The keys should be 'mito_perc',
@@ -557,7 +583,7 @@ def qc(adata,**kwargs):
 def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',
        min_cells=3, min_genes=200, nmads=5,
        max_cells_ratio=1,max_genes_ratio=1,
-       batch_key=None,doublets=True,doublets_method='scrublet',
+       batch_key=None,doublets=True,doublets_method='scdblfinder',
        filter_doublets=True,
        path_viz=None, tresh=None,mt_startswith='auto',mt_genes=None,
        ribo_startswith=("RPS", "RPL"),ribo_genes=None,
@@ -582,7 +608,7 @@ def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',
         max_genes_ratio : The maximum number of genes ratio for a cell to pass QC. Default is 1.
         nmads : The number of MADs to use for MADs filtering. Default is 5.
         doublets : Whether to perform doublet detection. Default is True.
-        doublets_method : The doublet detection method to use. Options are 'scrublet', 'sccomposite', 'doubletfinder', or 'scdblfinder'. Default is 'scrublet'.
+        doublets_method : The doublet detection method to use. Options are 'scrublet', 'sccomposite', 'doubletfinder', or 'scdblfinder'. Default is 'scdblfinder' (Python port of R scDblFinder; xgboost on kNN+cxds features). Falls back to 'scrublet' if pyscdblfinder is not installed.
         filter_doublets : Whether to filter out doublets (True) or just flag them (False). Default is True.
         path_viz : The path to save the QC plots. Default is None.
         tresh : A dictionary of QC thresholds. The keys should be 'mito_perc',
@@ -800,6 +826,7 @@ def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',
     
     if doublets is True:
         print(f"\n{Colors.HEADER}{Colors.BOLD}🔍 Step 4: Doublet Detection{Colors.ENDC}")
+        doublets_method = _resolve_doublets_method(doublets_method)
         if doublets_method not in ('scrublet', 'sccomposite', 'doubletfinder', 'scdblfinder'):
             raise ValueError(
                 f"Unknown doublets_method={doublets_method!r}; "
@@ -808,7 +835,7 @@ def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',
         if doublets_method=='scrublet':
             # Post doublets removal QC plot
             print(f"   {Colors.WARNING}⚠️  Note: 'scrublet' detection is legacy and may not work optimally{Colors.ENDC}")
-            print(f"   {Colors.CYAN}💡 Consider using 'doublets_method=sccomposite' for better results{Colors.ENDC}")
+            print(f"   {Colors.CYAN}💡 Consider using 'doublets_method=scdblfinder' (default) for better results{Colors.ENDC}")
             print(f"   {Colors.GREEN}{EMOJI['start']} Running scrublet doublet detection...{Colors.ENDC}")
             from ._scrublet import scrublet
             scrublet(adata, random_state=1234,batch_key=batch_key,use_gpu=use_gpu)
@@ -952,7 +979,7 @@ def qc_cpu(
     max_genes_ratio: Optional[float] = 1,
     batch_key: Optional[str] = None,
     doublets: Optional[bool] = True,
-    doublets_method: Optional[str] = 'scrublet',
+    doublets_method: Optional[str] = 'scdblfinder',
     filter_doublets: Optional[bool] = True,
     path_viz: Optional[str] = None, 
     tresh: Optional[dict] = None,
@@ -983,7 +1010,7 @@ def qc_cpu(
         max_genes_ratio : The maximum number of genes ratio for a cell to pass QC. Default is 1.
         nmads : The number of MADs to use for MADs filtering. Default is 5.
         doublets : Whether to perform doublet detection. Default is True.
-        doublets_method : The doublet detection method to use. Options are 'scrublet', 'sccomposite', 'doubletfinder', or 'scdblfinder'. Default is 'scrublet'.
+        doublets_method : The doublet detection method to use. Options are 'scrublet', 'sccomposite', 'doubletfinder', or 'scdblfinder'. Default is 'scdblfinder' (Python port of R scDblFinder; xgboost on kNN+cxds features). Falls back to 'scrublet' if pyscdblfinder is not installed.
         filter_doublets : Whether to filter out doublets (True) or just flag them (False). Default is True.
         path_viz : The path to save the QC plots. Default is None.
         tresh : A dictionary of QC thresholds. The keys should be 'mito_perc',
@@ -1189,6 +1216,7 @@ def qc_cpu(
 
     if doublets is True:
         print(f"\n{Colors.HEADER}{Colors.BOLD}🔍 Step 4: Doublet Detection{Colors.ENDC}")
+        doublets_method = _resolve_doublets_method(doublets_method)
         if doublets_method not in ('scrublet', 'sccomposite', 'doubletfinder', 'scdblfinder'):
             raise ValueError(
                 f"Unknown doublets_method={doublets_method!r}; "
@@ -1202,7 +1230,7 @@ def qc_cpu(
             from ._scrublet import scrublet
             # Post doublets removal QC plot
             print(f"   {Colors.WARNING}⚠️  Note: 'scrublet' detection is too old and may not work properly{Colors.ENDC}")
-            print(f"   {Colors.CYAN}💡 Consider using 'doublets_method=sccomposite' for better results{Colors.ENDC}")
+            print(f"   {Colors.CYAN}💡 Consider using 'doublets_method=scdblfinder' (default) for better results{Colors.ENDC}")
             print(f"   {Colors.GREEN}{EMOJI['start']} Running scrublet doublet detection...{Colors.ENDC}")
             if is_oom:
                 scrublet(adata_mem, random_state=1234, batch_key=batch_key)
@@ -1530,6 +1558,7 @@ def qc_gpu(adata, mode='seurat',
     
     if doublets is True:
         print(f"\n{Colors.HEADER}{Colors.BOLD}🔍 Step 4: Doublet Detection{Colors.ENDC}")
+        doublets_method = _resolve_doublets_method(doublets_method)
         if doublets_method not in ('scrublet', 'sccomposite', 'doubletfinder', 'scdblfinder'):
             raise ValueError(
                 f"Unknown doublets_method={doublets_method!r}; "

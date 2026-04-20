@@ -1,4 +1,4 @@
-"""Tests for the redesigned ``ov.single.autoResolution`` (Lange et al. 2004
+"""Tests for the redesigned ``ov.single.auto_resolution`` (Lange et al. 2004
 null-adjusted bootstrap-ARI; lives in ``omicverse/single/_autoresolution.py``).
 
 Builds small synthetic AnnData with 3 well-separated Gaussian blobs and
@@ -59,7 +59,7 @@ def test_autoresolution_picks_three_clusters_with_null_correction(
     import omicverse as ov
 
     a = adata_with_neighbors.copy()
-    _, best, df = ov.single.autoResolution(
+    _, best, df = ov.single.auto_resolution(
         a, resolutions=[0.1, 0.3, 0.5, 0.8, 1.2],
         n_subsamples=3, n_null_subsamples=2,
         random_state=0, verbose=False,
@@ -76,7 +76,7 @@ def test_uns_payload_carries_lange_method_label(adata_with_neighbors):
     import omicverse as ov
 
     a = adata_with_neighbors.copy()
-    ov.single.autoResolution(
+    ov.single.auto_resolution(
         a, resolutions=[0.3, 0.6], n_subsamples=2, n_null_subsamples=2,
         random_state=0, key_added="leiden_auto", verbose=False,
     )
@@ -100,7 +100,7 @@ def test_use_null_correction_false_falls_back_to_plain_stability(
     import omicverse as ov
 
     a = adata_with_neighbors.copy()
-    _, best, df = ov.single.autoResolution(
+    _, best, df = ov.single.auto_resolution(
         a, resolutions=[0.3, 0.6], n_subsamples=2,
         use_null_correction=False, random_state=0, verbose=False,
     )
@@ -121,7 +121,7 @@ def test_temp_obs_cols_are_cleaned(adata_with_neighbors):
 
     a = adata_with_neighbors.copy()
     obs_cols_before = set(a.obs.columns)
-    ov.single.autoResolution(
+    ov.single.auto_resolution(
         a, resolutions=[0.3, 0.5], n_subsamples=2, n_null_subsamples=2,
         random_state=0, verbose=False,
     )
@@ -140,18 +140,19 @@ def test_records_one_provenance_entry(adata_with_neighbors):
 
     a = adata_with_neighbors.copy()
     clear_provenance(a)
-    ov.single.autoResolution(
+    ov.single.auto_resolution(
         a, resolutions=[0.3, 0.6], n_subsamples=2, n_null_subsamples=2,
         random_state=0, verbose=False,
     )
     prov = get_provenance(a)
     names = [e["name"] for e in prov]
-    assert names == ["autoResolution"]
+    assert names == ["auto_resolution"]
     e = prov[0]
-    assert e["function"] == "ov.single.autoResolution"
+    assert e["function"] == "ov.single.auto_resolution"
     assert "ARI" in e["backend"]
     viz_fns = [v["function"] for v in e["viz"]]
     assert "ov.pl.cluster_sizes_bar" in viz_fns
+    assert "ov.pl.auto_resolution_curve" in viz_fns
 
 
 # ─────────────────────────── error paths ──────────────────────────────────────
@@ -163,7 +164,7 @@ def test_min_clusters_guard_raises(adata_with_neighbors):
 
     a = adata_with_neighbors.copy()
     with pytest.raises(RuntimeError, match="No resolution"):
-        ov.single.autoResolution(
+        ov.single.auto_resolution(
             a, resolutions=[0.1, 0.3], n_subsamples=2, n_null_subsamples=2,
             min_clusters=999, random_state=0, verbose=False,
         )
@@ -174,7 +175,7 @@ def test_requires_neighbor_graph():
 
     a = _three_blob_adata(n_per_blob=60, n_genes=20, seed=0)
     with pytest.raises(ValueError, match="connectivities"):
-        ov.single.autoResolution(a, verbose=False)
+        ov.single.auto_resolution(a, verbose=False)
 
 
 def test_rejects_tiny_adata():
@@ -182,4 +183,47 @@ def test_rejects_tiny_adata():
 
     a = _three_blob_adata(n_per_blob=10, n_genes=20, seed=0)
     with pytest.raises(ValueError, match="at least 50 cells"):
-        ov.single.autoResolution(a, verbose=False)
+        ov.single.auto_resolution(a, verbose=False)
+
+
+# ─────────────────────── auto_resolution_curve plot ───────────────────────────
+
+
+def test_auto_resolution_curve_renders_from_uns(adata_with_neighbors):
+    """``ov.pl.auto_resolution_curve(adata)`` reads from
+    ``adata.uns['autoResolution']`` and returns a matplotlib Axes."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    ov.single.auto_resolution(
+        a, resolutions=[0.3, 0.6, 1.0], n_subsamples=2, n_null_subsamples=2,
+        random_state=0, verbose=False,
+    )
+    ax = ov.pl.auto_resolution_curve(a)
+    assert isinstance(ax, plt.Axes)
+    # The chosen-resolution annotation should be in the plot.
+    texts = [t.get_text() for t in ax.texts]
+    assert any("chosen r=" in t for t in texts)
+    plt.close("all")
+
+
+def test_auto_resolution_curve_explicit_scores():
+    """The curve helper accepts an explicit scores DataFrame, no adata."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import omicverse as ov
+
+    df = pd.DataFrame({
+        "stability_real":   [0.6, 0.7, 0.8, 0.7],
+        "stability_null":   [1.0, 0.05, 0.06, 0.05],
+        "excess_stability": [-0.4, 0.65, 0.74, 0.65],
+        "n_clusters":       [3, 5, 7, 9],
+    }, index=[0.2, 0.4, 0.6, 0.8])
+    df.index.name = "resolution"
+    ax = ov.pl.auto_resolution_curve(scores=df)
+    assert isinstance(ax, plt.Axes)
+    plt.close("all")

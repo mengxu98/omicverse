@@ -163,7 +163,8 @@ def _build_null_adata(
 
 
 @register_function(
-    aliases=['自动分辨率选择', 'autoResolution', 'optimal leiden resolution'],
+    aliases=['自动分辨率选择', 'auto_resolution', 'autoResolution',
+             'optimal leiden resolution'],
     category="single",
     description=(
         "Pick the most reproducible Leiden resolution by null-adjusted "
@@ -177,13 +178,13 @@ def _build_null_adata(
     produces={'obs': ['leiden'], 'uns': ['autoResolution']},
     auto_fix='auto',
     examples=[
-        'res, df = ov.single.autoResolution(adata)',
-        'ov.single.autoResolution(adata, resolutions=np.arange(0.2, 2.0, 0.1))',
+        'res, df = ov.single.auto_resolution(adata)',
+        'ov.single.auto_resolution(adata, resolutions=np.arange(0.2, 2.0, 0.1))',
     ],
     related=['pp.leiden'],
 )
-@tracked('autoResolution', 'ov.single.autoResolution')
-def autoResolution(
+@tracked('auto_resolution', 'ov.single.auto_resolution')
+def auto_resolution(
     adata: anndata.AnnData,
     resolutions: Optional[Sequence[float]] = None,
     *,
@@ -418,6 +419,9 @@ def autoResolution(
                   if use_null_correction
                   else f'omicverse · ARI-stability · {n_subsamples} subsamples'),
         viz=[
+            # Selection-curve so the report shows WHY this r was chosen.
+            # Reads directly from adata.uns['autoResolution'].
+            {'function': 'ov.pl.auto_resolution_curve', 'kwargs': {}},
             {'function': 'ov.pl.cluster_sizes_bar',
               'kwargs': {'groupby': key_added}},
             *([{'function': 'ov.pl.embedding',
@@ -428,3 +432,9 @@ def autoResolution(
     )
 
     return adata, best, df
+
+
+# Backward-compatible camelCase alias. The canonical name is now
+# auto_resolution; downstream code that still imports autoResolution
+# keeps working.
+autoResolution = auto_resolution

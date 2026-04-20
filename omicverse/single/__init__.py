@@ -60,7 +60,7 @@ from ._mofa import (
     plot_factors_violin,plot_weights,
 )
 from ._scdrug import writeGEP, Drug_Response
-from ._autoresolution import autoResolution
+from ._autoresolution import auto_resolution, autoResolution
 from ._cpdb import (
     cpdb_network_cal,cpdb_plot_network,
     cpdb_plot_interaction,
@@ -313,7 +313,8 @@ __all__ = [
     'pathway_enrichment_plot',
     
     # Drug response analysis
-    'autoResolution',
+    'auto_resolution',
+    'autoResolution',  # backward-compatible camelCase alias
     'writeGEP',
     'Drug_Response',
     'scDiffusion',

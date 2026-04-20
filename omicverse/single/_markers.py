@@ -18,6 +18,8 @@ from scipy import sparse, stats
 
 from .._registry import register_function
 from .._settings import add_reference, Colors, EMOJI
+from ..report._provenance import record_step, tracks_depth
+import time as _ovtime
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 _CONST_MAX_SIZE: int = 10_000_000
@@ -594,6 +596,7 @@ def _cosg_add_pts(
     related=["single.get_markers", "pl.markers_dotplot", "single.cosg"],
 )
 @_oom_guard(materialize=True, result_keys_uns=['*'])
+@tracks_depth
 def find_markers(
     adata: AnnData,
     groupby: str,
@@ -680,6 +683,7 @@ def find_markers(
     else:
         _n_groups = len(groups)
 
+    _t0 = _ovtime.time()
     print(
         f"{Colors.CYAN}{EMOJI['start']} Finding marker genes{Colors.ENDC} | "
         f"{Colors.BOLD}method:{Colors.ENDC} {method} | "
@@ -713,6 +717,20 @@ def find_markers(
             f"{Colors.GREEN}{EMOJI['done']} Done{Colors.ENDC} | "
             f"{_n_groups} groups × {n_genes} genes | "
             f"stored in {Colors.BOLD}adata.uns['{key_added}']{Colors.ENDC}"
+        )
+        record_step(
+            adata, "find_markers", function="ov.single.find_markers",
+            params={"groupby": groupby, "method": method, "n_genes": n_genes,
+                    "key_added": key_added, "use_raw": use_raw, "layer": layer,
+                    "groups": groups, "reference": reference,
+                    "corr_method": corr_method, "rankby_abs": rankby_abs,
+                    "tie_correct": tie_correct, "pts": pts, **kwargs},
+            backend=f"omicverse · method={method}",
+            duration_s=_ovtime.time() - _t0,
+            viz=[{"function": "ov.pl.markers_dotplot",
+                  "kwargs": {"groupby": groupby,
+                              "key": key_added or "rank_genes_groups",
+                              "n_genes": 3, "standard_scale": "var"}}],
         )
         return
 
@@ -779,6 +797,21 @@ def find_markers(
     )
 
     add_reference(adata, "find_markers", f"marker gene identification with {method}")
+
+    record_step(
+        adata, "find_markers", function="ov.single.find_markers",
+        params={"groupby": groupby, "method": method, "n_genes": n_genes,
+                "key_added": key_added, "use_raw": use_raw, "layer": layer,
+                "groups": groups, "reference": reference,
+                "corr_method": corr_method, "rankby_abs": rankby_abs,
+                "tie_correct": tie_correct, "pts": pts, **kwargs},
+        backend=f"omicverse · method={method}",
+        duration_s=_ovtime.time() - _t0,
+        viz=[{"function": "ov.pl.markers_dotplot",
+              "kwargs": {"groupby": groupby,
+                          "key": key_added or "rank_genes_groups",
+                          "n_genes": 3, "standard_scale": "var"}}],
+    )
 
 
 # ── get_markers ────────────────────────────────────────────────────────────────

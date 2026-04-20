@@ -22,6 +22,8 @@ from ._scrublet_backend.helper_functions import (
 )
 from .._settings import EMOJI, Colors, settings
 from .._registry import register_function
+from ..report._provenance import record_step, tracks_depth
+import time as _ovtime
 from datetime import datetime
 
 # Import utility functions from pp module
@@ -76,6 +78,7 @@ if TYPE_CHECKING:
     ],
     related=["scrublet_simulate_doublets", "filter_cells", "filter_genes"],
 )
+@tracks_depth
 def scrublet(
     adata: AnnData,
     adata_sim: AnnData | None = None,
@@ -160,6 +163,7 @@ def scrublet(
     if copy:
         adata = adata.copy()
 
+    _t0 = _ovtime.time()
     print(f"\n{Colors.HEADER}{Colors.BOLD}{EMOJI['start']} Running Scrublet Doublet Detection:{Colors.ENDC}")
     print(f"   {Colors.CYAN}Mode: {Colors.BOLD}{settings.mode}{Colors.ENDC}")
     print(f"   {Colors.CYAN}Computing doublet prediction using Scrublet algorithm{Colors.ENDC}")
@@ -289,6 +293,25 @@ def scrublet(
     print(f"     {Colors.CYAN}• 'predicted_doublet': {Colors.BOLD}Boolean predictions{Colors.ENDC}{Colors.CYAN} (adata.obs){Colors.ENDC}")
     print(f"     {Colors.CYAN}• 'scrublet': {Colors.BOLD}Parameters and metadata{Colors.ENDC}{Colors.CYAN} (adata.uns){Colors.ENDC}")
 
+    record_step(
+        adata, "scrublet", function="ov.pp.scrublet",
+        params={"batch_key": batch_key, "sim_doublet_ratio": sim_doublet_ratio,
+                "expected_doublet_rate": expected_doublet_rate,
+                "stdev_doublet_rate": stdev_doublet_rate,
+                "synthetic_doublet_umi_subsampling": synthetic_doublet_umi_subsampling,
+                "knn_dist_metric": str(knn_dist_metric),
+                "normalize_variance": normalize_variance,
+                "log_transform": log_transform, "mean_center": mean_center,
+                "n_prin_comps": n_prin_comps,
+                "use_approx_neighbors": use_approx_neighbors,
+                "get_doublet_neighbor_parents": get_doublet_neighbor_parents,
+                "n_neighbors": n_neighbors, "threshold": threshold,
+                "random_state": random_state, "use_gpu": use_gpu},
+        backend=f"scrublet{'(gpu)' if use_gpu else ''}",
+        duration_s=_ovtime.time() - _t0,
+        viz=([{"function": "ov.pl.doublet_score_histogram", "kwargs": {}}]
+              if "doublet_score" in adata.obs.columns else []),
+    )
     return adata if copy else None
 
 

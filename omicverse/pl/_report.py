@@ -1,0 +1,242 @@
+"""Lightweight diagnostic plots used by :mod:`omicverse.report`.
+
+These helpers produce simple, publication-ready figures that cover a few
+gaps in ``omicverse.pl``: a cluster-size bar chart, a doublet-score
+histogram with the call threshold overlaid, and a neighbor-graph degree
+distribution. They are intentionally generic so you can call them
+directly as ``ov.pl.cluster_sizes_bar(adata, 'leiden')`` etc.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+from ._palette import palette_28, sc_color
+
+
+def _resolve_palette(n: int) -> list[str]:
+    """Return at least ``n`` distinct hex colours from omicverse palettes."""
+    base = list(palette_28) if n > len(sc_color) else list(sc_color)
+    if n <= len(base):
+        return base[:n]
+    return [base[i % len(base)] for i in range(n)]
+
+
+def cluster_sizes_bar(
+    adata,
+    groupby: str,
+    *,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (7.6, 3.2),
+    title: Optional[str] = None,
+    xlabel: Optional[str] = None,
+    ylabel: str = "# cells",
+    show: Optional[bool] = None,
+    return_fig: bool = False,
+):
+    """Bar chart of cell counts per cluster.
+
+    Parameters
+    ----------
+    adata
+        AnnData with ``groupby`` in ``adata.obs``.
+    groupby
+        Categorical column in ``adata.obs`` (e.g. ``"leiden"``).
+    ax
+        Matplotlib axes to draw into. A new figure is created if omitted.
+    figsize
+        Size of the created figure when ``ax`` is ``None``.
+    title, xlabel, ylabel
+        Text overrides.
+    show
+        If ``None`` (default), returns the ``Figure``/``Axes`` following
+        omicverse's convention; if ``False``, returns silently; if
+        ``True``, calls ``plt.show()``.
+    return_fig
+        If True and a new figure was created, return the ``Figure`` rather
+        than the ``Axes``.
+    """
+    if groupby not in adata.obs.columns:
+        raise ValueError(f"{groupby!r} not in adata.obs")
+    sizes = adata.obs[groupby].astype("category").value_counts().sort_index()
+    n = len(sizes)
+    colors = _resolve_palette(n)
+
+    created = ax is None
+    fig = ax.figure if ax is not None else plt.figure(figsize=figsize)
+    if ax is None:
+        ax = fig.add_subplot(111)
+
+    ax.bar(range(n), sizes.values, color=colors,
+           edgecolor="white", linewidth=0.4, width=0.85)
+    ax.set_xlabel(xlabel if xlabel is not None else f"{groupby} cluster")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title if title is not None
+                 else f"{groupby} cluster sizes  ·  total {n}")
+    if n <= 30:
+        ax.set_xticks(range(n))
+        ax.set_xticklabels([str(s) for s in sizes.index], rotation=0)
+
+    if show:
+        plt.show()
+    if created and return_fig:
+        return fig
+    return ax
+
+
+def doublet_score_histogram(
+    adata,
+    *,
+    score_key: str = "doublet_score",
+    call_key: str = "predicted_doublet",
+    bins: int = 60,
+    color: Optional[str] = None,
+    threshold_color: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (7.6, 3.0),
+    title: str = "Doublet score distribution",
+    show: Optional[bool] = None,
+    return_fig: bool = False,
+):
+    """Histogram of doublet scores with the call threshold marked.
+
+    Expects ``adata.obs[score_key]`` (e.g. from ``ov.pp.scdblfinder`` or
+    ``ov.pp.scrublet``). If ``adata.obs[call_key]`` is present the
+    smallest score among called doublets is drawn as a dashed threshold.
+    """
+    if score_key not in adata.obs.columns:
+        raise ValueError(f"{score_key!r} not in adata.obs — has doublet "
+                          "detection been run?")
+    s = adata.obs[score_key].dropna().astype(float).values
+    color = color or sc_color[7]
+    threshold_color = threshold_color or sc_color[10]
+
+    created = ax is None
+    fig = ax.figure if ax is not None else plt.figure(figsize=figsize)
+    if ax is None:
+        ax = fig.add_subplot(111)
+
+    ax.hist(s, bins=bins, color=color, alpha=0.85,
+            edgecolor="white", linewidth=0.3)
+    ax.set_xlabel(score_key)
+    ax.set_ylabel("# cells")
+    ax.set_title(title)
+    if call_key in adata.obs.columns and bool(adata.obs[call_key].sum()):
+        thr = float(adata.obs.loc[adata.obs[call_key], score_key].min())
+        ax.axvline(thr, color=threshold_color, linewidth=1.4, linestyle="--",
+                    label=f"call threshold = {thr:.2f}")
+        ax.legend(loc="upper right")
+
+    if show:
+        plt.show()
+    if created and return_fig:
+        return fig
+    return ax
+
+
+def highly_variable_genes_scatter(
+    adata,
+    *,
+    hv_col: str = "highly_variable",
+    mean_col: Optional[str] = None,
+    disp_col: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (6.0, 4.0),
+    title: str = "Highly variable genes",
+    show: Optional[bool] = None,
+    return_fig: bool = False,
+):
+    """Mean-vs-dispersion scatter with HVG highlighted.
+
+    Reads the per-gene stats produced by omicverse / scanpy HVG
+    selection. ``mean_col`` defaults to ``"means"`` (scanpy) or
+    ``"mean"`` (fallback); ``disp_col`` defaults to
+    ``"residual_variances"`` (omicverse pearson-residual flavour),
+    falling back to ``"dispersions_norm"`` or ``"variances"``.
+    """
+    var = adata.var
+    if hv_col not in var.columns:
+        raise ValueError(f"{hv_col!r} not in adata.var — run HVG selection first.")
+
+    if mean_col is None:
+        mean_col = next((c for c in ("means", "mean") if c in var.columns), None)
+    if disp_col is None:
+        disp_col = next(
+            (c for c in ("residual_variances", "dispersions_norm",
+                         "dispersions", "variances") if c in var.columns),
+            None,
+        )
+    if mean_col is None or disp_col is None:
+        raise ValueError("could not locate mean/dispersion columns in adata.var")
+
+    x = var[mean_col].astype(float).values
+    y = var[disp_col].astype(float).values
+    hv = var[hv_col].astype(bool).values
+
+    created = ax is None
+    fig = ax.figure if ax is not None else plt.figure(figsize=figsize)
+    if ax is None:
+        ax = fig.add_subplot(111)
+
+    ax.scatter(x[~hv], y[~hv], s=6, alpha=0.45, c="#B7B1A4",
+                linewidths=0, label="other")
+    ax.scatter(x[hv], y[hv], s=8, alpha=0.85, c=sc_color[10],
+                linewidths=0, label=f"HVG (n={int(hv.sum())})")
+    ax.set_xscale("log")
+    ax.set_xlabel(mean_col)
+    ax.set_ylabel(disp_col)
+    ax.set_title(title)
+    ax.legend(loc="upper right", frameon=False, markerscale=1.8)
+
+    if show:
+        plt.show()
+    if created and return_fig:
+        return fig
+    return ax
+
+
+def neighbor_degree_histogram(
+    adata,
+    *,
+    key: str = "connectivities",
+    bins: int = 60,
+    color: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (7.6, 3.0),
+    title: Optional[str] = None,
+    show: Optional[bool] = None,
+    return_fig: bool = False,
+):
+    """Per-cell sum of connectivities from the neighbor graph.
+
+    Reads ``adata.obsp[key]`` (default ``"connectivities"``, the standard
+    key used by ``ov.pp.neighbors``).
+    """
+    if not hasattr(adata, "obsp") or key not in adata.obsp:
+        raise ValueError(f"{key!r} not in adata.obsp — run ov.pp.neighbors first.")
+    G = adata.obsp[key]
+    deg = np.asarray(G.sum(axis=1)).ravel()
+    color = color or sc_color[5]
+
+    created = ax is None
+    fig = ax.figure if ax is not None else plt.figure(figsize=figsize)
+    if ax is None:
+        ax = fig.add_subplot(111)
+
+    ax.hist(deg, bins=bins, color=color, alpha=0.85,
+            edgecolor="white", linewidth=0.3)
+    ax.set_xlabel("Per-cell connectivity sum")
+    ax.set_ylabel("# cells")
+    nnz = getattr(G, "nnz", None)
+    if title is None:
+        title = (f"Neighbor-graph density  ·  nnz = {nnz:,}"
+                 if nnz is not None else "Neighbor-graph density")
+    ax.set_title(title)
+
+    if show:
+        plt.show()
+    if created and return_fig:
+        return fig
+    return ax

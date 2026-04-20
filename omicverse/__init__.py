@@ -86,6 +86,7 @@ _LAZY_MODULES = {
     'mcp',
     'metabol',
     'micro',
+    'report',
 }
 
 # Lazy attribute mappings: {attribute_name: (module_path, attr_name)}

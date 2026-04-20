@@ -59,6 +59,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "ilr":                  ("._pp", "ilr"),
     # phylogeny
     "attach_tree":          ("._phylo", "attach_tree"),
+    # meta-analysis
+    "combine_studies":      ("._meta", "combine_studies"),
+    "meta_da":              ("._meta", "meta_da"),
 }
 
 __all__ = sorted(_LAZY_ATTRS)

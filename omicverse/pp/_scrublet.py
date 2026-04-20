@@ -22,6 +22,7 @@ from ._scrublet_backend.helper_functions import (
 )
 from .._settings import EMOJI, Colors, settings
 from .._registry import register_function
+from ..report._provenance import tracked, note
 from datetime import datetime
 
 # Import utility functions from pp module
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     ],
     related=["scrublet_simulate_doublets", "filter_cells", "filter_genes"],
 )
+@tracked("scrublet", "ov.pp.scrublet")
 def scrublet(
     adata: AnnData,
     adata_sim: AnnData | None = None,
@@ -289,6 +291,9 @@ def scrublet(
     print(f"     {Colors.CYAN}• 'predicted_doublet': {Colors.BOLD}Boolean predictions{Colors.ENDC}{Colors.CYAN} (adata.obs){Colors.ENDC}")
     print(f"     {Colors.CYAN}• 'scrublet': {Colors.BOLD}Parameters and metadata{Colors.ENDC}{Colors.CYAN} (adata.uns){Colors.ENDC}")
 
+    note(backend=f"scrublet{'(gpu)' if use_gpu else ''}",
+         viz=([{"function": "ov.pl.doublet_score_histogram", "kwargs": {}}]
+               if "doublet_score" in adata.obs.columns else []))
     return adata if copy else None
 
 

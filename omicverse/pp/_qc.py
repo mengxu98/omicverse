@@ -22,6 +22,7 @@ from scipy.sparse import issparse
 from .._settings import settings,print_gpu_usage_color,EMOJI,add_reference,Colors
 from .._registry import register_function
 from .._monitor import monitor
+from ..report._provenance import tracked, note
 
 
 # Local implementations to replace scanpy filtering functions
@@ -524,6 +525,7 @@ def _mt_mask(var_names, mt_startswith):
     ],
     related=["preprocess", "filter_cells", "filter_genes", "scrublet"]
 )
+@tracked("qc", "ov.pp.qc")
 def qc(
     adata,
     *,
@@ -605,17 +607,37 @@ def qc(
 
     if _is_oom(adata):
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['cpu']} Using CPU mode for QC (out-of-memory)...{Colors.ENDC}")
-        return qc_cpu(adata, **kwargs)
+        result = qc_cpu(adata, **kwargs)
+        note(backend=f"omicverse({settings.mode}) · cpu(oom) · mode={mode}")
     elif settings.mode == 'gpu':
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['gpu']} Using RAPIDS GPU to calculate QC...{Colors.ENDC}")
-        return qc_gpu(adata, **kwargs)
+        result = qc_gpu(adata, **kwargs)
+        note(backend=f"omicverse({settings.mode}) · rapids · mode={mode}")
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['mixed']} Using CPU/GPU mixed mode for QC...{Colors.ENDC}")
         print_gpu_usage_color()
-        return qc_cpu_gpu_mixed(adata, **kwargs, **mixed_only)
+        result = qc_cpu_gpu_mixed(adata, **kwargs, **mixed_only)
+        note(backend=f"omicverse({settings.mode}) · mixed · mode={mode}")
     else:
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['cpu']} Using CPU mode for QC...{Colors.ENDC}")
-        return qc_cpu(adata, **kwargs)
+        result = qc_cpu(adata, **kwargs)
+        note(backend=f"omicverse({settings.mode}) · cpu · mode={mode}")
+
+    # Build viz from whatever actually ended up on the (possibly filtered)
+    # AnnData. qc invokes a doublet backend internally; surface its plot
+    # here rather than let it leak as a phantom sub-entry.
+    target = result if (result is not None and hasattr(result, "uns")) else adata
+    qc_metrics = [c for c in ("nUMIs", "detected_genes", "mito_perc",
+                                "ribo_perc", "hb_perc", "doublet_score")
+                   if c in target.obs.columns]
+    viz = []
+    if qc_metrics:
+        viz.append({"function": "ov.pl.violin",
+                    "kwargs": {"keys": qc_metrics}})
+    if doublets and "doublet_score" in target.obs.columns:
+        viz.append({"function": "ov.pl.doublet_score_histogram", "kwargs": {}})
+    note(viz=viz)
+    return result
     
 
 def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',

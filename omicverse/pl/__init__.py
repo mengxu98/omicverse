@@ -156,6 +156,12 @@ from ._spatialseg import (
 )
 from ._nanostring import nanostring, nanostringseg
 from ._violin import violin
+from ._report import (
+    cluster_sizes_bar,
+    doublet_score_histogram,
+    highly_variable_genes_scatter,
+    neighbor_degree_histogram,
+)
 from ._animation_lines import (
     Streamlines,
     add_streamplot,
@@ -336,6 +342,11 @@ __all__ = [
     "nanostringseg",
     # @ _violin
     "violin",
+    # @ _report
+    "cluster_sizes_bar",
+    "doublet_score_histogram",
+    "highly_variable_genes_scatter",
+    "neighbor_degree_histogram",
     # @ _animation_lines
     "Streamlines",
     "add_streamplot",

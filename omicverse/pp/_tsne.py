@@ -47,6 +47,7 @@ def tsne(  # noqa: PLR0913
     key_added: str | None = None,
     copy: bool = False,
     use_gpu: bool = False,
+    n_iter: int | None = None,
 ) -> AnnData | None:
     r"""t-SNE (t-distributed Stochastic Neighbor Embedding) with GPU support.
 
@@ -182,26 +183,30 @@ def tsne(  # noqa: PLR0913
     if use_fast_tsne is False:  # In case MultiCore failed to import
         if use_gpu:
             print(f"   {Colors.GREEN}{EMOJI['start']} Computing t-SNE with GPU acceleration...{Colors.ENDC}")
-            from torchdr import TSNE
             import torch
             from .._settings import get_optimal_device, prepare_data_for_device
-            
+            from ..external.torch_tsne import tsne_gpu
+
             device = get_optimal_device(prefer_gpu=True, verbose=True)
-            
-            # Prepare data for MPS compatibility (float32 requirement)
             X = prepare_data_for_device(X, device, verbose=True)
-            
-            tsne = TSNE(
-                perplexity=perplexity,
-                random_state=random_state,
-                early_exaggeration_coeff=early_exaggeration,
-                lr=learning_rate,
+
+            # Our Adam-based KL-loss t-SNE wants a much smaller lr than
+            # sklearn's SGD-style default. If the caller passed a sklearn-
+            # convention ≥100 value, use our internal default instead.
+            tsne_lr = 0.5 if learning_rate >= 100 else float(learning_rate)
+            gpu_kwargs = dict(
                 n_components=n_components,
+                perplexity=perplexity,
+                learning_rate=tsne_lr,
+                early_exaggeration=early_exaggeration,
+                random_state=random_state,
                 device=device,
             )
-            X_tsne = tsne.fit_transform(X)
-            print(f"   {Colors.CYAN}💡 Using TorchDR GPU-accelerated t-SNE on {device}{Colors.ENDC}")
-            del tsne
+            if n_iter is not None:
+                gpu_kwargs["n_iter"] = int(n_iter)
+            X_tsne = tsne_gpu(X, **gpu_kwargs)
+            print(f"   {Colors.CYAN}💡 Using omicverse torch t-SNE (KL loss, MC Z estimate) on {device}{Colors.ENDC}")
+
             import gc
             if device.type == 'cuda':
                 torch.cuda.empty_cache()

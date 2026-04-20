@@ -407,6 +407,10 @@ def neighbors(  # noqa: PLR0913
     adata = adata.copy() if copy else adata
     if adata.is_view:  # we shouldn't need this here...
         adata._init_as_actual(adata.copy())
+    # Defend against Python id() reuse: if an old AnnData at this address
+    # was cached, drop it before we cache a new graph for the current one.
+    from ._gpu_cache import cache_invalidate
+    cache_invalidate(adata)
     neighbors = Neighbors(adata)
     neighbors.compute_neighbors(
         n_neighbors,
@@ -464,6 +468,14 @@ def neighbors(  # noqa: PLR0913
 
     adata.obsp[dists_key] = D
     adata.obsp[conns_key] = C
+
+    # Register device-resident COO tensors in the cache (keyed against the
+    # final adata.obsp matrix so downstream consumers compare the right
+    # source). Skipped for non-GPU paths.
+    gpu_coo = getattr(neighbors, "_gpu_coo", None)
+    if gpu_coo is not None:
+        from ._gpu_cache import cache_set
+        cache_set(adata, "connectivities", gpu_coo, source_obj=adata.obsp[conns_key])
 
     # adata.obsp[dists_key] = neighbors.distances
     # adata.obsp[conns_key] = neighbors.connectivities
@@ -884,16 +896,28 @@ class Neighbors:
             )
         elif method == "torch":
             import torch
-            from ._connectivity import umap_gpu_optimized
+            from ..external.umap_pytorch.fuzzy_gpu import fuzzy_simplicial_set_gpu
+            from scipy.sparse import coo_matrix
+
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"   {Colors.CYAN}Using device: {Colors.BOLD}{device}{Colors.ENDC}")
-            self._connectivities = umap_gpu_optimized(
-                knn_indices,
-                knn_distances,
-                n_obs=self._adata.shape[0],
-                n_neighbors=self.n_neighbors,
-                device=device,
+
+            # Build the fuzzy simplicial set on device once. Convert to scipy
+            # CSR for adata.obsp (existing contract) and stash the GPU tensors
+            # on self so the outer neighbors() can register them in the cache
+            # for downstream ov.pp.umap / ov.pp.leiden to reuse.
+            knn_i = torch.as_tensor(knn_indices, dtype=torch.long, device=device)
+            knn_d = torch.as_tensor(knn_distances, dtype=torch.float32, device=device)
+            rows, cols, vals = fuzzy_simplicial_set_gpu(
+                knn_i, knn_d, n_neighbors=int(self.n_neighbors),
             )
+            n_obs = self._adata.shape[0]
+            self._connectivities = coo_matrix(
+                (vals.detach().cpu().numpy(),
+                 (rows.detach().cpu().numpy(), cols.detach().cpu().numpy())),
+                shape=(n_obs, n_obs),
+            ).tocsr()
+            self._gpu_coo = (rows, cols, vals, n_obs)
         elif method is not None:
             msg = f"{method!r} should have been coerced in _handle_transform_args"
             raise AssertionError(msg)
@@ -966,8 +990,11 @@ class Neighbors:
             msg = f"`method` needs to be one of {methods}."
             raise ValueError(msg)
 
-        # Validate `knn`
-        conn_method = method if method in {"gauss", None} else "umap"
+        # Validate `knn`. ``torch`` keeps its own identity (not coerced to
+        # ``umap``) so the GPU fuzzy_simplicial_set branch in
+        # ``compute_neighbors`` fires instead of umap-learn's CPU one; this
+        # is what the ``cpu-gpu-mixed`` mode was supposed to do all along.
+        conn_method = method if method in {"gauss", None, "torch"} else "umap"
         if not knn and not (conn_method == "gauss" and transformer is None):
             # “knn=False” seems to be only intended for method “gauss”
             msg = f"`method = {method!r} only with `knn = True`."

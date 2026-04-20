@@ -392,9 +392,14 @@ def umap(  # noqa: PLR0913, PLR0915
             min_delta=1e-5,
         )
 
-        # Fit and transform
+        # Reuse the GPU fuzzy graph if a prior ov.pp.neighbors(method='torch')
+        # populated the cache — skips rebuilding KNN.
+        from ._gpu_cache import cache_get
+        precomputed = cache_get(
+            adata, "connectivities", source_obj=neighbors["connectivities"],
+        )
         print(f"   {Colors.CYAN}Training parametric UMAP model...{Colors.ENDC}")
-        pumap.fit(X_tensor)
+        pumap.fit(X_tensor, precomputed_gpu_coo=precomputed)
         X_umap = pumap.transform(X_tensor)
 
         print(f"   {Colors.CYAN}💡 Using Parametric UMAP (PyTorch) on {device}{Colors.ENDC}")

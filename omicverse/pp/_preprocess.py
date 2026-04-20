@@ -531,7 +531,13 @@ from sklearn.cluster import KMeans
     ],
     related=["pp.anndata_to_CPU", "settings.gpu_init", "pp.qc", "pp.preprocess"]
 )
-def anndata_to_GPU(adata,**kwargs):
+def anndata_to_GPU(
+    adata,
+    *,
+    convert_all: bool = True,
+    copy: bool = False,
+    **kwargs,
+):
     """Migrate AnnData objects to GPU memory for accelerated processing.
 
     Arguments:
@@ -553,7 +559,9 @@ def anndata_to_GPU(adata,**kwargs):
         >>> ov.pp.anndata_to_CPU(adata)
     """
     import rapids_singlecell as rsc
-    rsc.get.anndata_to_GPU(adata,**kwargs)
+    kwargs.setdefault("convert_all", convert_all)
+    kwargs.setdefault("copy", copy)
+    rsc.get.anndata_to_GPU(adata, **kwargs)
     print('Data has been moved to GPU')
     print('Don`t forget to move it back to CPU after analysis is done')
     print('Use `ov.pp.anndata_to_CPU(adata)`')
@@ -881,25 +889,51 @@ def preprocess(
     ],
     related=["highly_variable_genes", "scale", "pca"],
 )
-def normalize_pearson_residuals(adata,**kwargs):
-    """Normalize count matrix using Pearson residuals.
+def normalize_pearson_residuals(
+    adata,
+    *,
+    theta: float = 100,
+    clip: float | None = None,
+    check_values: bool = True,
+    layer: str | None = None,
+    inplace: bool = True,
+    copy: bool = False,
+    **kwargs,
+):
+    """Normalize a count matrix using analytic Pearson residuals (Lause 2021).
 
     Parameters
     ----------
     adata : anndata.AnnData
-        AnnData object containing raw or count-like expression values in
-        ``adata.X``.
+        AnnData object containing counts in ``adata.X`` (or ``layer``).
+    theta
+        Negative binomial overdispersion parameter. ``100`` matches
+        Lause 2021 and is a reasonable default for scRNA.
+    clip
+        Clip residuals to ``[-clip, clip]``. ``None`` uses the
+        scanpy default (``sqrt(n_obs)``).
+    check_values
+        Validate that the input looks like counts.
+    layer
+        Layer to normalise. ``None`` uses ``adata.X``.
+    inplace
+        Write back into ``adata`` (``True``) or return the matrix
+        (``False``).
+    copy
+        Return a new AnnData instead of modifying in place (only when
+        ``inplace=True``).
     **kwargs
-        Additional keyword arguments passed to
-        ``scanpy.experimental.pp.normalize_pearson_residuals``.
+        Forwarded to ``scanpy.experimental.pp.normalize_pearson_residuals``.
 
     Returns
     -------
     None
-        Updates ``adata.X`` in place with Pearson residual-normalized values.
+        Updates ``adata.X`` in place with Pearson residuals.
     """
-
-    sc.experimental.pp.normalize_pearson_residuals(adata,**kwargs)
+    sc.experimental.pp.normalize_pearson_residuals(
+        adata, theta=theta, clip=clip, check_values=check_values,
+        layer=layer, inplace=inplace, copy=copy, **kwargs,
+    )
 
 @monitor
 @register_function(
@@ -920,25 +954,79 @@ def normalize_pearson_residuals(adata,**kwargs):
     ],
     related=["highly_variable_features", "normalize_pearson_residuals", "pca"],
 )
-def highly_variable_genes(adata, **kwargs):
-    """Run HVG detection and write flags/statistics into ``adata.var``.
+def highly_variable_genes(
+    adata,
+    *,
+    layer: str | None = None,
+    n_top_genes: int | None = None,
+    min_disp: float = 0.5,
+    max_disp=None,
+    min_mean: float = 0.0125,
+    max_mean: float = 3,
+    span: float = 0.3,
+    n_bins: int = 20,
+    flavor: str = "seurat",
+    subset: bool = False,
+    inplace: bool = True,
+    batch_key: str | None = None,
+    filter_unexpressed_genes: bool | None = None,
+    check_values: bool = True,
+    **kwargs,
+):
+    """Annotate highly variable genes (Satija 2015 / Zheng 2017 / Stuart 2019).
 
     Parameters
     ----------
     adata : anndata.AnnData
-        AnnData object with expression matrix and optional layers.
+        Expression matrix. Expects log-normalised data except for
+        ``flavor='seurat_v3'`` / ``'seurat_v3_paper'`` which expect counts.
+    layer
+        Layer to use. ``None`` uses ``adata.X``.
+    n_top_genes
+        Number of HVGs to keep. Required for ``flavor='seurat_v3'``.
+    min_disp, max_disp, min_mean, max_mean
+        Dispersion / mean cutoffs for ``flavor='seurat'`` and
+        ``flavor='cell_ranger'``.
+    span
+        Loess smoothing span for ``flavor='seurat_v3'``.
+    n_bins
+        Dispersion normalisation bins.
+    flavor
+        ``'seurat'`` (default), ``'cell_ranger'``, ``'seurat_v3'``, or
+        ``'seurat_v3_paper'``.
+    subset
+        If True, subset the AnnData to the HVGs in place.
+    inplace
+        Write statistics into ``adata.var`` rather than returning a
+        DataFrame.
+    batch_key
+        If set, HVG detection is done per batch.
+    filter_unexpressed_genes
+        Drop genes with zero total expression before selection.
+    check_values
+        Input validation (log-normalised vs counts).
     **kwargs
-        Keyword arguments forwarded to ``omicverse.pp._highly_variable_genes``.
-        Typical options include ``flavor``, ``n_top_genes``, ``layer`` and
-        ``batch_key``.
+        Extra options forwarded to
+        ``omicverse.pp._highly_variable_genes.highly_variable_genes``.
 
     Returns
     -------
-    Any
-        Returns the wrapped HVG function result while mutating ``adata.var``.
+    pandas.DataFrame | None
+        Mutates ``adata.var``; also returns the stats DataFrame unless
+        ``inplace=True``.
     """
     from ._highly_variable_genes import highly_variable_genes as _hvg
-    return _hvg(adata, **kwargs)
+    import numpy as np
+    if max_disp is None:
+        max_disp = np.inf
+    return _hvg(
+        adata, layer=layer, n_top_genes=n_top_genes,
+        min_disp=min_disp, max_disp=max_disp, min_mean=min_mean,
+        max_mean=max_mean, span=span, n_bins=n_bins, flavor=flavor,
+        subset=subset, inplace=inplace, batch_key=batch_key,
+        filter_unexpressed_genes=filter_unexpressed_genes,
+        check_values=check_values, **kwargs,
+    )
 
 @monitor
 @register_function(
@@ -1049,24 +1137,34 @@ def scale(adata, max_value=10, layers_add='scaled', to_sparse=False, **kwargs):
     ],
     related=["scale", "regress_and_scale", "pca"],
 )
-def regress(adata,**kwargs):
-    """Regress out technical covariates from each gene.
+def regress(adata, *, layer=None, n_jobs=8, **kwargs):
+    """Regress out technical covariates (``mito_perc``, ``nUMIs``) from
+    each gene.
 
     Parameters
     ----------
     adata : anndata.AnnData
         AnnData object with ``adata.obs['mito_perc']`` and
-        ``adata.obs['nUMIs']`` already computed.
+        ``adata.obs['nUMIs']`` already computed (by ``ov.pp.qc``).
+    layer
+        Expression layer to regress. ``None`` uses ``adata.X``.
+    n_jobs
+        Parallel jobs for the CPU regressor. Default ``8``.
     **kwargs
-        Extra options passed to backend regressors, e.g. ``n_jobs``.
+        Extra options forwarded to the backend
+        (``scanpy.pp.regress_out`` or ``rapids_singlecell.pp.regress_out``).
 
     Returns
     -------
     None
-        Writes regressed expression values to ``adata.layers['regressed']``.
+        Writes the residualised expression to ``adata.layers['regressed']``.
     """
+    if layer is not None:
+        kwargs.setdefault("layer", layer)
+    kwargs.setdefault("n_jobs", n_jobs)
     if settings.mode == 'cpu' or settings.mode == 'cpu-gpu-mixed':
-        adata_mock = sc.pp.regress_out(adata, ['mito_perc', 'nUMIs'], n_jobs=8, copy=True,**kwargs)
+        kwargs.setdefault("copy", True)
+        adata_mock = sc.pp.regress_out(adata, ['mito_perc', 'nUMIs'], **kwargs)
         adata.layers['regressed'] = adata_mock.X.copy()
         del adata_mock
     else:
@@ -1483,11 +1581,99 @@ def neighbors(
     examples=["ov.pp.umap(adata)"],
     related=["tsne", "pca", "mde", "neighbors"]
 )
-def umap(adata, **kwargs):
+def umap(
+    adata,
+    *,
+    min_dist: float = 0.5,
+    spread: float = 1.0,
+    n_components: int = 2,
+    maxiter: int | None = None,
+    alpha: float = 1.0,
+    gamma: float = 1.0,
+    negative_sample_rate: int = 5,
+    init_pos=None,
+    random_state=0,
+    a: float | None = None,
+    b: float | None = None,
+    method: str | None = None,
+    key_added: str | None = None,
+    neighbors_key: str = "neighbors",
+    copy: bool = False,
+    **kwargs,
+):
+    """Compute UMAP embedding, dispatching to the best backend for
+    ``ov.settings.mode``.
+
+    Parameters
+    ----------
+    adata
+        Annotated data matrix; neighbors must already be computed.
+    min_dist
+        Minimum distance between embedded points. Default ``0.5`` matches
+        scanpy; smaller gives more densely packed clusters.
+    spread
+        Scale at which embedded points are spread out.
+    n_components
+        Output dimensions (2 for typical visualisation).
+    maxiter
+        Number of edge-SGD passes. Defaults are backend-specific — scanpy
+        uses 200 for N>10k, 500 otherwise.
+    alpha
+        Initial learning rate of the edge-SGD optimiser. Only used by
+        non-parametric backends.
+    gamma
+        Weighting for negative samples. Default ``1.0`` matches scanpy.
+    negative_sample_rate
+        Number of negative samples per positive edge. Default ``5``.
+    init_pos
+        Embedding initialisation: ``'paga'``, ``'spectral'``, ``'random'``,
+        or an ``ndarray``. ``None`` lets the backend pick.
+    random_state
+        Seed for reproducibility.
+    a, b
+        UMAP curve parameters. ``None`` derives them from ``spread`` +
+        ``min_dist`` via ``umap.umap_.find_ab_params``.
+    method
+        Explicit backend override, e.g. ``'umap'`` (scanpy/umap-learn),
+        ``'pumap'`` (omicverse's parametric GPU UMAP), ``'torchdr'``,
+        ``'mde'``, ``'rapids'``. ``None`` picks the right default for the
+        current ``ov.settings.mode``.
+    key_added
+        Key under which to store results; default ``'X_umap'`` /
+        ``'umap'``.
+    neighbors_key
+        ``.uns`` key holding the precomputed neighbor graph.
+    copy
+        Return a new AnnData instead of modifying in place.
+    **kwargs
+        Forwarded to the underlying backend (``_umap.umap``,
+        ``rapids_singlecell.tl.umap`` etc.).
+
+    Notes
+    -----
+    Behaviour by ``ov.settings.mode``:
+
+    * ``'cpu'``                    — scanpy / umap-learn (CPU).
+    * ``'cpu-gpu-mixed'``          — parametric UMAP on GPU (pumap).
+    * anything else (``'gpu'``)    — RAPIDS if available, falls back to
+                                     pumap on import error.
     """
-    Run UMAP on AnnData, choosing implementation based on settings.mode,
-    The argument could be found in `scanpy.pp.umap`
-    """
+    # Build the kwargs dict that downstream dispatchers expect. Keep
+    # `method` and `init_pos` optional so each branch can pick its default.
+    forward = dict(
+        min_dist=min_dist, spread=spread, n_components=n_components,
+        maxiter=maxiter, alpha=alpha, gamma=gamma,
+        negative_sample_rate=negative_sample_rate, random_state=random_state,
+        a=a, b=b, neighbors_key=neighbors_key, copy=copy,
+    )
+    if init_pos is not None:
+        forward["init_pos"] = init_pos
+    if method is not None:
+        forward["method"] = method
+    if key_added is not None:
+        forward["key_added"] = key_added
+    forward.update(kwargs)
+    kwargs = forward
     print(f"{EMOJI['start']} [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running UMAP in '{settings.mode}' mode...")
     try:
         if settings.mode == 'cpu':
@@ -1543,24 +1729,95 @@ def umap(adata, **kwargs):
     ],
     related=["leiden", "neighbors", "umap"],
 )
-def louvain(adata, **kwargs):
+def louvain(
+    adata,
+    resolution=None,
+    *,
+    random_state=0,
+    key_added="louvain",
+    neighbors_key=None,
+    directed=True,
+    use_weights=False,
+    copy=False,
+    **kwargs,
+):
     """Run Louvain clustering on the precomputed kNN graph.
 
     Parameters
     ----------
     adata : anndata.AnnData
-        AnnData object with neighborhood graph already computed.
+        AnnData object with a neighborhood graph already computed.
+    resolution
+        Resolution γ; higher values yield more, smaller clusters.
+    random_state
+        Seed for reproducibility.
+    key_added
+        Column in ``adata.obs`` to store labels. Default ``'louvain'``.
+    neighbors_key
+        Key in ``adata.uns`` for the neighbor dict. ``None`` uses the
+        standard ``'neighbors'`` slot.
+    directed, use_weights
+        Forwarded to the igraph backend; rarely need tuning.
+    copy
+        Return a new AnnData instead of modifying in place.
     **kwargs
-        Parameters passed to backend Louvain implementations, e.g.
-        ``resolution`` and ``key_added``.
+        Forwarded to the underlying backend
+        (``scanpy.tl.louvain`` or ``rapids_singlecell.tl.louvain``).
 
-    Returns
-    -------
-    None
-        Adds Louvain labels to ``adata.obs``.
+    Notes
+    -----
+    In ``ov.settings.mode='cpu-gpu-mixed'`` this is auto-routed to
+    ``ov.pp.leiden`` (Louvain has no GPU backend and Leiden is its strict
+    improvement). Labels are still written to ``adata.obs[key_added]`` so
+    existing notebooks keep working.
     """
+    if resolution is not None:
+        kwargs["resolution"] = resolution
+    kwargs.setdefault("random_state", random_state)
+    kwargs.setdefault("key_added", key_added)
+    if neighbors_key is not None:
+        kwargs["neighbors_key"] = neighbors_key
+    kwargs.setdefault("directed", directed)
+    kwargs.setdefault("use_weights", use_weights)
+    kwargs.setdefault("copy", copy)
 
-    if settings.mode =='cpu' or settings.mode == 'cpu-gpu-mixed':
+    if settings.mode == 'cpu-gpu-mixed':
+        # Louvain has no GPU implementation in mixed mode, but Leiden is its
+        # strict improvement (Traag et al. 2019) and we have a fast GPU
+        # version. Auto-redirect with a deprecation warning, writing results
+        # under the requested key so existing notebooks keep working.
+        import warnings
+        key_added = kwargs.pop('key_added', 'louvain')
+        # Only forward kwargs that ov.pp.leiden actually accepts. Anything
+        # else (Louvain/igraph-specific like partition_type / node_sizes) is
+        # dropped with a visible warning so users aren't surprised.
+        _leiden_accepted = {
+            "resolution", "random_state", "local_iterations", "max_levels",
+            "device", "symmetrize",
+        }
+        dropped = {k: v for k, v in kwargs.items() if k not in _leiden_accepted}
+        safe_kwargs = {k: v for k, v in kwargs.items() if k in _leiden_accepted}
+        if dropped:
+            warnings.warn(
+                "Dropped louvain-specific kwargs that ov.pp.leiden does not "
+                f"accept: {sorted(dropped)}. Either remove them or switch "
+                "to ov.pp.leiden directly.",
+                UserWarning,
+                stacklevel=2,
+            )
+        warnings.warn(
+            "ov.pp.louvain in cpu-gpu-mixed mode is deprecated: there is no "
+            "GPU Louvain backend, and Leiden is a strict improvement on "
+            "modularity-quality grounds (Traag et al. 2019). Auto-routing to "
+            "ov.pp.leiden; switch your call to ov.pp.leiden to silence this "
+            f"warning. Result is still stored at adata.obs[{key_added!r}].",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        print(f"{EMOJI['mixed']} cpu-gpu-mixed: louvain auto-routed to GPU Leiden (deprecation)")
+        leiden(adata, key_added=key_added, **safe_kwargs)
+        return
+    if settings.mode == 'cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU Louvain...")
         sc.tl.louvain(adata, **kwargs)
         add_reference(adata,'louvain','Louvain clustering with scanpy')
@@ -1747,22 +2004,78 @@ def score_genes_cell_cycle(adata,species='human',s_genes=None, g2m_genes=None):
     ],
     related=["umap", "mde", "pca"],
 )
-def tsne(adata,**kwargs):
-    """Compute t-SNE coordinates for cells.
+def tsne(
+    adata,
+    n_pcs=None,
+    *,
+    n_components: int = 2,
+    use_rep: str | None = None,
+    perplexity: float = 30,
+    metric: str = "euclidean",
+    early_exaggeration: float = 12,
+    learning_rate: float = 1000,
+    random_state=0,
+    key_added: str | None = None,
+    copy: bool = False,
+    n_iter: int | None = None,
+    **kwargs,
+):
+    """Compute t-SNE coordinates for cells, dispatching by
+    ``ov.settings.mode``.
 
     Parameters
     ----------
     adata : anndata.AnnData
-        AnnData object with PCA representation available.
+        AnnData with PCA (or another ``use_rep``) available.
+    n_pcs
+        Number of PCs to use from ``adata.obsm['X_pca']``.
+    n_components
+        Output dimensions (typically 2).
+    use_rep
+        ``.obsm`` key to compute t-SNE on; defaults to ``X_pca``.
+    perplexity
+        Controls the effective number of nearest neighbors used to
+        construct the high-D affinities. Typical range 5–50.
+    metric
+        Distance metric for neighbor search. ``'euclidean'`` by default.
+    early_exaggeration
+        Scaling applied to P during the early-exaggeration phase
+        (first ~250 iterations). Larger makes clusters tighter in the
+        output.
+    learning_rate
+        Learning rate of the optimiser. ``1000`` is the sklearn default;
+        the GPU backend auto-rescales to a much smaller value internally.
+    random_state
+        Seed for reproducibility.
+    key_added
+        Target ``.obsm`` / ``.uns`` key. Defaults to ``'X_tsne'`` / ``'tsne'``.
+    copy
+        Return a new AnnData instead of modifying in place.
+    n_iter
+        Total optimisation iterations. ``None`` uses the backend default.
     **kwargs
-        Backend-specific t-SNE parameters, such as ``perplexity``,
-        ``random_state`` and ``n_pcs``.
+        Forwarded to the backend (``scanpy.tl.tsne``,
+        ``omicverse.pp._tsne.tsne``, or ``rapids_singlecell.tl.tsne``).
 
-    Returns
-    -------
-    None
-        Stores embedding in ``adata.obsm['X_tsne']``.
+    Notes
+    -----
+    ``cpu-gpu-mixed`` mode uses our KL-loss native torch t-SNE
+    (see ``omicverse/external/torch_tsne.py``) — no ``torchdr`` dependency.
     """
+    kwargs.setdefault("n_pcs", n_pcs)
+    kwargs.setdefault("n_components", n_components)
+    if use_rep is not None:
+        kwargs.setdefault("use_rep", use_rep)
+    kwargs.setdefault("perplexity", perplexity)
+    kwargs.setdefault("metric", metric)
+    kwargs.setdefault("early_exaggeration", early_exaggeration)
+    kwargs.setdefault("learning_rate", learning_rate)
+    kwargs.setdefault("random_state", random_state)
+    if key_added is not None:
+        kwargs.setdefault("key_added", key_added)
+    kwargs.setdefault("copy", copy)
+    if n_iter is not None:
+        kwargs.setdefault("n_iter", n_iter)
     if settings.mode == 'cpu':
         print(f"{EMOJI['cpu']} Using Scanpy CPU t-SNE...")
         sc.tl.tsne(adata, **kwargs)

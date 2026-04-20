@@ -203,7 +203,7 @@ class PUMAP():
         self.graph_n_epochs = graph_n_epochs
         self.negative_sample_rate = negative_sample_rate
 
-    def fit(self, X):
+    def fit(self, X, precomputed_gpu_coo=None):
         # Set device
         device = torch.device('cuda' if torch.cuda.is_available() and self.num_gpus > 0 else 'cpu')
 
@@ -238,7 +238,19 @@ class PUMAP():
 
             # Fully-GPU path (KNN + fuzzy_simplicial_set on device) when CUDA + euclidean.
             use_gpu_graph = device.type == "cuda" and self.metric == "euclidean"
-            if use_gpu_graph:
+            if precomputed_gpu_coo is not None:
+                p_rows, p_cols, p_vals, p_nv = precomputed_gpu_coo
+                print(f"{Colors.CYAN}♻️  Reusing cached GPU fuzzy graph ({p_rows.numel()} edges){Colors.ENDC}")
+                dataset = StreamingUMAPDataset(
+                    X,
+                    gpu_coo=(p_rows, p_cols, p_vals, p_nv),
+                    batch_size=self.batch_size,
+                    graph_n_epochs=per_epoch_graph_n,
+                    seed=self.random_state,
+                    device=device,
+                    negative_sample_rate=self.negative_sample_rate,
+                )
+            elif use_gpu_graph:
                 rows, cols, vals, n_vertices = get_umap_graph_gpu(
                     X, n_neighbors=self.n_neighbors, metric=self.metric,
                     random_state=self.random_state, device=device,

@@ -248,8 +248,19 @@ def _contract(row, col, val, comm, n_comm):
 
 def _pick_device(device):
     if device is None:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(device)
+    return _normalize_device(device)
+
+
+def _normalize_device(device):
+    """Give ``cuda`` a concrete index so equality comparisons against tensor
+    devices (which land on ``cuda:N``) don't silently miss."""
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    return device
 
 
 def _choose_graph_local(adata, obsp_key, neighbors_key):
@@ -312,9 +323,15 @@ def leiden_gpu_sparse_multilevel(
     None (modifies ``adata`` in place; see ``key_added``).
     """
     dev = _pick_device(device)
-    if dev.type != "cuda":
-        # Soft fall-back: this implementation needs a CUDA device for the
-        # Python-overhead-killing layout to matter. Defer to igraph CPU.
+
+    # Small-N fast path: at small N the multilevel loop's thousands of
+    # CUDA-kernel launches dominate the actual compute. On some GPUs this
+    # can make cpu-gpu-mixed mode *slower* than igraph CPU by 100x+ for
+    # datasets under ~10k cells (e.g. pbmc3k: 50s mixed vs 0.1s igraph).
+    # Defer to igraph below the threshold; it's fast there and matches
+    # the output scanpy users are used to.
+    n_obs = int(adata.n_obs)
+    if dev.type != "cuda" or n_obs < 10000:
         from ._leiden import leiden as _leiden_cpu
 
         return _leiden_cpu(
@@ -338,12 +355,26 @@ def leiden_gpu_sparse_multilevel(
     if symmetrize is False:
         sym = adjacency
     else:
-        sym = adjacency.maximum(adjacency.T) if symmetrize is True else adjacency.maximum(adjacency.T)
+        sym = adjacency.maximum(adjacency.T)
 
     n0 = sym.shape[0]
-    row, col, val = _to_coo_tensors(sym, dev)
-    if not use_weights:
-        val = torch.ones_like(val)
+
+    # Fast path: if a prior ov.pp.neighbors(method='torch') produced this
+    # same graph on device, reuse it instead of the scipy→GPU round-trip.
+    # fuzzy_simplicial_set_gpu already returns a symmetric graph so we can
+    # use the cached tensors directly regardless of ``symmetrize``.
+    from ._gpu_cache import cache_get
+    cached = cache_get(ad, "connectivities", source_obj=adjacency) if use_weights else None
+    if cached is not None:
+        c_row, c_col, c_val, c_n = cached
+        if _normalize_device(c_row.device) == dev and c_n == n0:
+            row, col, val = c_row, c_col, c_val
+        else:
+            cached = None  # wrong device / shape; fall through
+    if cached is None:
+        row, col, val = _to_coo_tensors(sym, dev)
+        if not use_weights:
+            val = torch.ones_like(val)
     # Self-loops are KEPT in (row, col, val) so they survive contraction
     # (intra-community mass at higher levels lives as self-loops). The
     # local-move filters them out per-batch when computing k_ic.

@@ -524,7 +524,31 @@ def _mt_mask(var_names, mt_startswith):
     ],
     related=["preprocess", "filter_cells", "filter_genes", "scrublet"]
 )
-def qc(adata,**kwargs):
+def qc(
+    adata,
+    *,
+    mode: str = "seurat",
+    min_cells: int = 3,
+    min_genes: int = 200,
+    nmads: int = 5,
+    max_cells_ratio: float = 1,
+    max_genes_ratio: float = 1,
+    batch_key=None,
+    doublets: bool = True,
+    doublets_method: str = "scdblfinder",
+    filter_doublets: bool = True,
+    path_viz=None,
+    tresh=None,
+    mt_startswith: str = "auto",
+    mt_genes=None,
+    ribo_startswith=("RPS", "RPL"),
+    ribo_genes=None,
+    hb_startswith="^HB[^(P)]",
+    hb_genes=None,
+    use_gpu: bool = True,
+    batch_wise_mad=None,
+    **kwargs,
+):
     r'''
     Perform quality control on a dictionary of AnnData objects.
 
@@ -564,20 +588,34 @@ def qc(adata,**kwargs):
 
     '''
 
+    # Re-pack explicit kwargs so the per-mode implementations see them.
+    kwargs.update(dict(
+        mode=mode, min_cells=min_cells, min_genes=min_genes, nmads=nmads,
+        max_cells_ratio=max_cells_ratio, max_genes_ratio=max_genes_ratio,
+        batch_key=batch_key, doublets=doublets,
+        doublets_method=doublets_method, filter_doublets=filter_doublets,
+        path_viz=path_viz, tresh=tresh,
+        mt_startswith=mt_startswith, mt_genes=mt_genes,
+        ribo_startswith=ribo_startswith, ribo_genes=ribo_genes,
+        hb_startswith=hb_startswith, hb_genes=hb_genes,
+    ))
+    # qc_cpu_gpu_mixed accepts these; qc_cpu/qc_gpu may not — filter
+    # only where needed.
+    mixed_only = dict(use_gpu=use_gpu, batch_wise_mad=batch_wise_mad)
+
     if _is_oom(adata):
-        # OOM path always uses CPU with chunked operations
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['cpu']} Using CPU mode for QC (out-of-memory)...{Colors.ENDC}")
-        return qc_cpu(adata,**kwargs)
+        return qc_cpu(adata, **kwargs)
     elif settings.mode == 'gpu':
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['gpu']} Using RAPIDS GPU to calculate QC...{Colors.ENDC}")
-        return qc_gpu(adata,**kwargs)
+        return qc_gpu(adata, **kwargs)
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['mixed']} Using CPU/GPU mixed mode for QC...{Colors.ENDC}")
         print_gpu_usage_color()
-        return qc_cpu_gpu_mixed(adata,**kwargs)
+        return qc_cpu_gpu_mixed(adata, **kwargs, **mixed_only)
     else:
         print(f"{Colors.HEADER}{Colors.BOLD}{EMOJI['cpu']} Using CPU mode for QC...{Colors.ENDC}")
-        return qc_cpu(adata,**kwargs)
+        return qc_cpu(adata, **kwargs)
     
 
 def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',

@@ -1591,8 +1591,8 @@ def louvain(adata, **kwargs):
     related=["louvain", "neighbors"]
 )
 def leiden(
-    adata, resolution=1.0, random_state=0, 
-    key_added='leiden', local_iterations=100, max_levels=10, device='cpu', symmetrize=None, **kwargs):
+    adata, resolution=1.0, random_state=0,
+    key_added='leiden', local_iterations=100, max_levels=10, device=None, symmetrize=None, **kwargs):
     '''
     leiden clustering
     '''
@@ -1607,8 +1607,7 @@ def leiden(
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{EMOJI['mixed']} Using torch CPU/GPU mixed mode to calculate Leiden...")
         print_gpu_usage_color()
-        #from ._leiden_pyg import leiden_gpu_sparse_multilevel as _leiden
-        from ._leiden_test import leiden_gpu_sparse_multilevel as _leiden
+        from ._leiden_gpu import leiden_gpu_sparse_multilevel as _leiden
 
         _leiden(
             adata,

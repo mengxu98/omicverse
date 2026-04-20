@@ -59,9 +59,8 @@ from ._mofa import (
     plot_factor_group_associations,plot_factor_boxplots,
     plot_factors_violin,plot_weights,
 )
-from ._scdrug import (
-    autoResolution,writeGEP,Drug_Response
-)
+from ._scdrug import writeGEP, Drug_Response
+from ._autoresolution import autoResolution
 from ._cpdb import (
     cpdb_network_cal,cpdb_plot_network,
     cpdb_plot_interaction,

@@ -339,23 +339,36 @@ def umap(  # noqa: PLR0913, PLR0915
 
         # Get neighbor parameters
         n_neighbors = neighbors["params"]["n_neighbors"]
-        n_epochs = 20 if maxiter is None else maxiter
 
         # Convert data to torch tensor
         X_contiguous = np.ascontiguousarray(X, dtype=np.float32)
         X_tensor = torch.from_numpy(X_contiguous)
 
-        # Determine appropriate batch size based on dataset size
+        # The default MLP is tiny (50->200->200->200->2) so per-batch GPU
+        # compute is dwarfed by Python loop + CUDA launch overhead until the
+        # batch is in the tens of thousands. Sweep at 10k cells: 1024 -> 2.6s,
+        # 4096 -> 0.6s, 16384 -> 0.39s, 65536 -> 0.32s. 16384 is the sweet
+        # spot — fewer batches than 4096, but still enough optimizer steps
+        # for convergence at any N.
         n_samples = X.shape[0]
-        batch_size = min(512, max(32, n_samples // 10))
+        batch_size = 16384
 
-        # Use a reasonable learning rate (not the UMAP alpha parameter)
-        # alpha is for UMAP curve, not good as learning rate
+        # `maxiter` is total edge-SGD graph passes (umap-learn semantics);
+        # internally we split it into `training_epochs` chunks for early
+        # stopping. Defaults match umap-learn (200 for N>10k, 500 below).
+        total_graph_epochs = maxiter if maxiter is not None else (
+            500 if n_samples <= 10_000 else 200
+        )
+        training_epochs = 4
+
+        # Adam learning rate. UMAP `alpha` is the curve exponent, not a NN LR.
         learning_rate = 1e-3
 
         print(f"   {Colors.CYAN}Dataset: {Colors.BOLD}{n_samples} samples × {X.shape[1]} features{Colors.ENDC}")
         print(f"   {Colors.CYAN}Batch size: {Colors.BOLD}{batch_size}{Colors.ENDC}")
         print(f"   {Colors.CYAN}Learning rate: {Colors.BOLD}{learning_rate}{Colors.ENDC}")
+        print(f"   {Colors.CYAN}Total graph passes: {Colors.BOLD}{total_graph_epochs}{Colors.ENDC} "
+              f"{Colors.CYAN}(split into {Colors.BOLD}{training_epochs}{Colors.ENDC}{Colors.CYAN} training epochs){Colors.ENDC}")
 
         # Initialize PUMAP with early stopping
         pumap = PUMAP(
@@ -367,15 +380,16 @@ def umap(  # noqa: PLR0913, PLR0915
             n_components=n_components,
             beta=1.0,
             random_state=random_state,
-            lr=learning_rate,  # Use proper learning rate for neural network
-            epochs=n_epochs,
+            lr=learning_rate,
+            epochs=training_epochs,
+            graph_n_epochs=total_graph_epochs,
             batch_size=batch_size,
-            num_workers=0,  # Avoid multiprocessing issues
+            num_workers=0,  # Avoid CUDA-multiprocessing issues
             num_gpus=num_gpus,
             match_nonparametric_umap=False,
-            early_stopping=True,  # Enable early stopping
-            patience=20,  # Stop if no improvement for 20 epochs (more patient)
-            min_delta=1e-5,  # Smaller threshold for improvement
+            early_stopping=True,
+            patience=2,  # In *training epochs* — each is a long edge pass.
+            min_delta=1e-5,
         )
 
         # Fit and transform

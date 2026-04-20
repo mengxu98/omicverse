@@ -156,13 +156,21 @@ def note(**fields) -> None:
         note(viz=[{'function': 'ov.pl.embedding', 'kwargs': {...}}])
         note(params={**kwargs, 'forwarded': True})   # override defaults
 
+    ``viz`` is **additive**: multiple ``note(viz=[...])`` calls in the
+    same body append to the step's viz list rather than overwriting.
+    All other fields follow standard dict-update semantics (later wins).
+
     No-op when called outside any ``@tracked`` body — safe to sprinkle in
     helpers that are sometimes called directly.
     """
     stack = getattr(_state, "stack", None)
     if not stack:
         return
-    stack[-1].update(fields)
+    entry = stack[-1]
+    viz = fields.pop("viz", None)
+    if viz is not None:
+        entry.setdefault("viz", []).extend(viz)
+    entry.update(fields)
 
 
 def tracked(name: str, function: str):
@@ -204,6 +212,10 @@ def tracked(name: str, function: str):
                 n: v for n, v in zip(param_names, args[1:])
             }
             captured = {**positional, **kwargs}
+            adata_in = args[0] if args else kwargs.get("adata")
+            # Cell count BEFORE the step runs — lets the report summarise
+            # "cells X → Y" for filtering / QC steps.
+            n_obs_before = getattr(adata_in, "n_obs", None)
             stack = _stack()
             stack.append({
                 "name": name,
@@ -224,13 +236,15 @@ def tracked(name: str, function: str):
                 return result
             # Prefer the returned AnnData if the dispatcher uses copy-semantics.
             target = (result if (result is not None and hasattr(result, "uns"))
-                      else (args[0] if args else kwargs.get("adata")))
+                      else adata_in)
             record_step(
                 target, entry["name"],
                 function=entry["function"],
                 params=entry["params"],
                 backend=entry["backend"],
                 duration_s=time.time() - t0,
+                n_obs_before=n_obs_before,
+                n_obs_after=getattr(target, "n_obs", None),
                 viz=entry["viz"],
             )
             return result
@@ -297,16 +311,24 @@ def pick_color_key(adata, preference: Optional[Iterable[str]] = None) -> Optiona
 def track(adata, name: str, *, function: str,
           params: Optional[dict] = None, backend: str = "",
           viz: Optional[list[dict]] = None):
-    """Context-manager form — prefer :func:`tracked` + :func:`note` instead."""
+    """Context-manager form — prefer :func:`tracked` + :func:`note` instead.
+
+    Like :func:`tracked`, only records on successful completion: if the
+    wrapped block raises, no entry is emitted. This keeps the report
+    from showing ghost entries for failed steps.
+    """
     n_before = getattr(adata, "n_obs", None)
     t0 = time.time()
+    success = False
     try:
         yield
+        success = True
     finally:
-        record_step(
-            adata, name, function=function, params=params, backend=backend,
-            duration_s=time.time() - t0,
-            n_obs_before=n_before,
-            n_obs_after=getattr(adata, "n_obs", None),
-            viz=viz,
-        )
+        if success:
+            record_step(
+                adata, name, function=function, params=params, backend=backend,
+                duration_s=time.time() - t0,
+                n_obs_before=n_before,
+                n_obs_after=getattr(adata, "n_obs", None),
+                viz=viz,
+            )

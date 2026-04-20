@@ -12,12 +12,14 @@ nothing to draw.
 from __future__ import annotations
 
 import base64
+import inspect
 import io
 from typing import Optional
 
-import matplotlib
-
-matplotlib.use("Agg")
+# Do NOT call matplotlib.use() at import time — it would clobber the
+# user's current backend for the rest of the Python session (a real
+# problem in Jupyter). fig.savefig(buf, format='png') works regardless
+# of which interactive backend is selected; no backend switch needed.
 import matplotlib.pyplot as plt
 
 
@@ -68,9 +70,14 @@ def _encode(fig) -> str:
 
 
 def _fig_from(result) -> Optional[plt.Figure]:
-    """``ov.pl.*`` helpers variously return Axes, Figure, dicts, or None."""
-    if result is None:
-        return plt.gcf() if plt.get_fignums() else None
+    """``ov.pl.*`` helpers variously return Axes, Figure, dicts, or None.
+
+    Fall back to the most recently opened pyplot figure only when the
+    callee almost certainly drew *something* via the pyplot API (i.e.
+    ``plt.get_fignums()`` is non-empty); otherwise return ``None`` so
+    the caller can record a missing figure rather than snapshot a stale
+    one from a previous render.
+    """
     if isinstance(result, plt.Figure):
         return result
     if isinstance(result, plt.Axes):
@@ -81,7 +88,22 @@ def _fig_from(result) -> Optional[plt.Figure]:
             return first.figure
         if isinstance(first, plt.Figure):
             return first
-    return plt.gcf() if plt.get_fignums() else None
+    fignums = plt.get_fignums()
+    if fignums:
+        return plt.figure(fignums[-1])
+    return None
+
+
+def _accepts(fn, name: str) -> bool:
+    """Does ``fn`` accept a keyword called ``name``?"""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True  # built-ins / C-extensions: assume yes, let it raise
+    params = sig.parameters
+    if name in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _render_one(viz_entry: dict, adata) -> Optional[str]:
@@ -89,15 +111,11 @@ def _render_one(viz_entry: dict, adata) -> Optional[str]:
     if fn is None:
         return None
     kwargs = dict(viz_entry.get("kwargs", {}) or {})
-    # Friendly defaults for anything that takes `show` — we never want
-    # the backend to try to open a window.
-    kwargs.setdefault("show", False)
-    try:
-        result = fn(adata, **kwargs)
-    except TypeError:
-        # Some plotting helpers don't accept `show` — retry without it.
-        kwargs.pop("show", None)
-        result = fn(adata, **kwargs)
+    # Only pass ``show=False`` to helpers that actually declare it —
+    # avoids retry-on-TypeError swallowing unrelated type errors.
+    if _accepts(fn, "show"):
+        kwargs.setdefault("show", False)
+    result = fn(adata, **kwargs)
     fig = _fig_from(result)
     if fig is None:
         return None

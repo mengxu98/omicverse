@@ -20,6 +20,26 @@ from .._registry import register_function
 from .._settings import add_reference, Colors, EMOJI
 from ..report._provenance import tracked, note
 
+
+def _note_markers(method: str, groupby: str, key_added: Optional[str]) -> None:
+    """Emit the standard find_markers provenance annotation.
+
+    Both branches (cosg / native statistical tests) land in the same
+    storage slot and visualize the same way, so hoist the note() call.
+    """
+    note(
+        backend=f"omicverse · method={method}",
+        viz=[{
+            "function": "ov.pl.markers_dotplot",
+            "kwargs": {
+                "groupby": groupby,
+                "key": key_added or "rank_genes_groups",
+                "n_genes": 3,
+                "standard_scale": "var",
+            },
+        }],
+    )
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 _CONST_MAX_SIZE: int = 10_000_000
 
@@ -716,11 +736,7 @@ def find_markers(
             f"{_n_groups} groups × {n_genes} genes | "
             f"stored in {Colors.BOLD}adata.uns['{key_added}']{Colors.ENDC}"
         )
-        note(backend=f"omicverse · method={method}",
-             viz=[{"function": "ov.pl.markers_dotplot",
-                    "kwargs": {"groupby": groupby,
-                                "key": key_added or "rank_genes_groups",
-                                "n_genes": 3, "standard_scale": "var"}}])
+        _note_markers(method, groupby, key_added)
         return
 
     # ── Native statistical tests ───────────────────────────────────────────────
@@ -786,11 +802,7 @@ def find_markers(
     )
 
     add_reference(adata, "find_markers", f"marker gene identification with {method}")
-    note(backend=f"omicverse · method={method}",
-         viz=[{"function": "ov.pl.markers_dotplot",
-                "kwargs": {"groupby": groupby,
-                            "key": key_added or "rank_genes_groups",
-                            "n_genes": 3, "standard_scale": "var"}}])
+    _note_markers(method, groupby, key_added)
 
 
 # ── get_markers ────────────────────────────────────────────────────────────────

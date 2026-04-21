@@ -186,6 +186,65 @@ def test_rejects_tiny_adata():
         ov.single.auto_resolution(a, verbose=False)
 
 
+# ─────────────────────── method='champ' backend route ─────────────────────────
+
+
+def test_method_champ_routes_to_champ(adata_with_neighbors):
+    """`method='champ'` delegates to ov.pp.champ and returns a scalar
+    resolution + the CHAMP partitions DataFrame."""
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    _, best_r, df = ov.single.auto_resolution(
+        a, method='champ',
+        gamma_min=0.05, gamma_max=1.5, n_partitions=10,
+        random_state=0, verbose=False,
+    )
+    assert isinstance(best_r, float)
+    # CHAMP-shape DataFrame, not bootstrap-ARI-shape.
+    assert {"a", "b", "n_clusters", "on_hull",
+            "gamma_lo", "gamma_hi", "gamma_range"}.issubset(df.columns)
+    # CHAMP writes its payload under key_added (default 'leiden') —
+    # reachable via ov.pl.champ_landscape(adata).
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ax = ov.pl.champ_landscape(a)
+    assert isinstance(ax, plt.Axes)
+    plt.close("all")
+
+
+def test_invalid_method_raises(adata_with_neighbors):
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    with pytest.raises(ValueError, match="method must be"):
+        ov.single.auto_resolution(a, method='unknown-thing', verbose=False)
+
+
+def test_method_champ_silences_nested_champ_provenance(adata_with_neighbors):
+    """When called via auto_resolution(method='champ'), the nesting
+    guard silences ov.pp.champ's own record_step — only one provenance
+    entry (named 'auto_resolution') appears, and its backend reflects
+    that CHAMP was used."""
+    import omicverse as ov
+    from omicverse.report._provenance import (
+        clear_provenance, get_provenance,
+    )
+
+    a = adata_with_neighbors.copy()
+    clear_provenance(a)
+    ov.single.auto_resolution(
+        a, method='champ',
+        gamma_min=0.1, gamma_max=1.2, n_partitions=6,
+        random_state=0, verbose=False,
+    )
+    prov = get_provenance(a)
+    names = [e["name"] for e in prov]
+    assert names == ["auto_resolution"]
+    assert "CHAMP" in prov[0]["backend"]
+
+
 # ─────────────────────── auto_resolution_curve plot ───────────────────────────
 
 

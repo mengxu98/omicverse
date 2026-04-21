@@ -62,6 +62,16 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     # meta-analysis
     "combine_studies":      ("._meta", "combine_studies"),
     "meta_da":              ("._meta", "meta_da"),
+    # paired microbe ↔ metabolite integration
+    "simulate_paired":      ("._pair", "simulate_paired"),
+    "paired_spearman":      ("._pair", "paired_spearman"),
+    "paired_cca":           ("._pair", "paired_cca"),
+    "MMvec":                ("._pair", "MMvec"),
+    "plot_mmvec_training":           ("._pair", "plot_mmvec_training"),
+    "plot_cca_scatter":              ("._pair", "plot_cca_scatter"),
+    "plot_cooccurrence":             ("._pair", "plot_cooccurrence"),
+    "plot_embedding_biplot":         ("._pair", "plot_embedding_biplot"),
+    "plot_paired_method_comparison": ("._pair", "plot_paired_method_comparison"),
 }
 
 __all__ = sorted(_LAZY_ATTRS)

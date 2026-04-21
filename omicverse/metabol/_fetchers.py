@@ -479,6 +479,17 @@ def fetch_hmdb_from_name(
         warnings.warn(f"PubChem CID lookup failed for {name!r}: "
                       f"{type(exc).__name__}: {exc}",
                       UserWarning, stacklevel=2)
+        # Cache the empty result on 404 / timeout too, so the next
+        # caller skips this name instead of re-hitting PubChem. That
+        # used to cost 20+ s on re-runs for datasets with many
+        # chemical-shift placeholder names (MTBLS1's NMR data has
+        # ~50 `unknown_m_<ppm>` names that PubChem 404s on).
+        if cache:
+            cache_data[key] = out
+            try:
+                cache_path.write_text(json.dumps(cache_data, indent=1))
+            except Exception:
+                pass
         return out
 
     try:

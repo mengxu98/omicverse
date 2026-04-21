@@ -38,9 +38,10 @@ from .._registry import register_function
         'qc_cv_filter',
     ],
     category='metabolomics',
-    description='Drop metabolite features with coefficient-of-variation above a threshold across pooled QC samples (metabolomics-specific QC).',
+    description='Drop metabolite features with coefficient-of-variation above a threshold. Default computes CV across pooled QC samples (metabolomics-specific); pass `across="all"` to compute across every sample (for NMR / non-QC-pool studies).',
     examples=[
         "ov.metabol.cv_filter(adata, qc_mask='is_qc', cv_threshold=0.30)",
+        "ov.metabol.cv_filter(adata, across='all', cv_threshold=1.5)",
     ],
     related=[
         'metabol.drift_correct',
@@ -50,35 +51,66 @@ from .._registry import register_function
 def cv_filter(
     adata: AnnData,
     *,
-    qc_mask: str | np.ndarray,
+    qc_mask: "str | np.ndarray | None" = None,
     cv_threshold: float = 0.30,
+    across: str = "qc",
 ) -> AnnData:
-    """Drop features with coefficient-of-variation above ``cv_threshold`` in QC samples.
+    """Drop features with coefficient-of-variation above ``cv_threshold``.
 
     Parameters
     ----------
     qc_mask
         Either the name of a boolean column in ``adata.obs`` (True = QC
         pool sample), or a boolean array of length ``adata.n_obs``.
+        Required when ``across='qc'`` (the default). Ignored when
+        ``across='all'``.
     cv_threshold
-        Features with ``std/mean > cv_threshold`` across QC samples are
-        dropped. Default 0.30 is the community standard for untargeted
-        LC-MS; lower values (0.20) for targeted / high-stringency.
+        Features with ``std/mean > cv_threshold`` are dropped. Default
+        0.30 is the community standard for untargeted LC-MS with QC
+        pools; for ``across='all'`` on biological samples a much
+        higher threshold (1–2) is typical because biology itself
+        adds variance.
+    across
+        - ``"qc"`` (default) — compute CV across QC-pool samples only
+          (the MetaboAnalyst convention for LC-MS); requires
+          ``qc_mask``.
+        - ``"all"`` — compute CV across every sample. Use for NMR
+          datasets or any workflow without pooled QC injections.
+          MTBLS1-style studies fall in this bucket.
 
     Returns
     -------
     AnnData
-        Subset to the features that passed. Features dropped:
-        ``adata.n_vars - out.n_vars``.
+        Subset to features that passed. ``adata.var['qc_cv']`` carries
+        the CV values on the kept features.
     """
-    mask = _resolve_sample_mask(adata, qc_mask)
-    qc_X = adata.X[mask]
-    if qc_X.shape[0] < 3:
+    if across == "qc":
+        if qc_mask is None:
+            raise ValueError(
+                "cv_filter(across='qc') requires a qc_mask (bool column or "
+                "array marking QC-pool samples). For studies without QC "
+                "pools pass `across='all'`."
+            )
+        mask = _resolve_sample_mask(adata, qc_mask)
+        X_sub = adata.X[mask]
+        if X_sub.shape[0] < 3:
+            raise ValueError(
+                f"Need ≥3 QC samples for a meaningful CV filter, got "
+                f"{X_sub.shape[0]}"
+            )
+    elif across == "all":
+        X_sub = np.asarray(adata.X)
+        if X_sub.shape[0] < 3:
+            raise ValueError(
+                f"Need ≥3 samples for a meaningful CV filter, got "
+                f"{X_sub.shape[0]}"
+            )
+    else:
         raise ValueError(
-            f"Need ≥3 QC samples for a meaningful CV filter, got {qc_X.shape[0]}"
+            f"across must be 'qc' or 'all', got {across!r}"
         )
-    mu = np.nanmean(qc_X, axis=0)
-    sd = np.nanstd(qc_X, axis=0, ddof=1)
+    mu = np.nanmean(X_sub, axis=0)
+    sd = np.nanstd(X_sub, axis=0, ddof=1)
     # Avoid divide-by-zero on all-zero features
     with np.errstate(divide="ignore", invalid="ignore"):
         cv = np.where(mu > 0, sd / mu, np.inf)

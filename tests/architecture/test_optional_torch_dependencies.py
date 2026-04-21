@@ -177,9 +177,12 @@ def _install_single_dependency_stubs():
             "plot_weights": object(),
         },
         "omicverse.single._scdrug": {
-            "autoResolution": object(),
             "writeGEP": object(),
             "Drug_Response": object(),
+        },
+        "omicverse.single._autoresolution": {
+            "auto_resolution": object(),
+            "autoResolution": object(),
         },
         "omicverse.single._cpdb": {
             "cpdb_network_cal": object(),
@@ -191,6 +194,17 @@ def _install_single_dependency_stubs():
             "cpdb_exact_source": object(),
             "cellphonedb_v5": object(),
             "run_cellphonedb_v5": object(),
+            "format_cpdb_results": object(),
+            "format_cpdb_results_for_viz": object(),
+        },
+        "omicverse.single._liana": {
+            "run_liana": object(),
+            "format_liana_results": object(),
+            "format_liana_results_for_viz": object(),
+        },
+        "omicverse.single._comm": {
+            "to_comm_adata": object(),
+            "extract_comm_adata": object(),
         },
         "omicverse.single._scgsea": {
             "geneset_aucell": object(),
@@ -247,6 +261,7 @@ def _install_single_dependency_stubs():
             "list_checkpoints": object(),
             "cleanup_checkpoints": object(),
         },
+        "omicverse.single._monocle": {"Monocle": object()},
         "omicverse.single._lazy_step_by_step": {
             "lazy_step_qc": object(),
             "lazy_step_preprocess": object(),
@@ -276,6 +291,10 @@ def _install_single_dependency_stubs():
         "omicverse.single._velo": {"Velo": object(), "velocity_embedding": object()},
         "omicverse.single._milo_dev": {"Milo": object()},
         "omicverse.single._markers": {"find_markers": object(), "get_markers": object()},
+        "omicverse.single._dynamic_features": {
+            "DynamicFeaturesResult": object(),
+            "dynamic_features": object(),
+        },
     }
 
     for module_name, attrs in module_defs.items():

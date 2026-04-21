@@ -75,6 +75,38 @@ class TestBatchCorrectionCCA:
         )
         assert "X_cca" in adata.obsm
 
+    def test_returns_adata_for_chaining(self):
+        """batch_correction(methods='cca') must return adata so the
+        ``adata = batch_correction(adata, methods='cca')`` pattern
+        works — matches scanorama / OOM branches."""
+        import omicverse as ov
+
+        adata = _toy_adata(n_batches=2)
+        out = ov.single.batch_correction(
+            adata, batch_key="batch", methods="cca", n_pcs=6,
+        )
+        assert out is adata
+        assert "X_cca" in out.obsm
+
+    def test_unknown_kwargs_warn_not_raise(self):
+        """Unknown kwargs (e.g. typos) should warn and continue rather
+        than raising TypeError — matches the loose-kwarg contract of
+        the other backends."""
+        import warnings
+        import omicverse as ov
+
+        adata = _toy_adata(n_batches=2)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ov.single.batch_correction(
+                adata, batch_key="batch", methods="cca", n_pcs=6,
+                n_layer=2,  # deliberate typo-like extra kwarg
+            )
+        msgs = [str(w.message) for w in caught]
+        assert any("ignored unknown kwargs" in m and "n_layer" in m
+                   for m in msgs), msgs
+        assert "X_cca" in adata.obsm
+
     def test_single_batch_raises(self):
         import omicverse as ov
 
@@ -119,7 +151,6 @@ class TestBatchCorrectionCCA:
         bt = adata.obs["batch"].to_numpy()
         ct = adata.obs["cell_type"].to_numpy()
         # cross-batch, same celltype
-        m_cross = np.zeros_like(D, dtype=bool)
         m_within_ct = (ct[:, None] == ct[None, :]) & (bt[:, None] != bt[None, :])
         np.fill_diagonal(m_within_ct, False)
         d_cross_same_ct = D[m_within_ct].mean()

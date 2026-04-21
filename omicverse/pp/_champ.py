@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import io
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import anndata
 import numpy as np
@@ -82,10 +82,11 @@ def _modularity_coefficients(W, labels) -> tuple[float, float]:
     same = labels[coo.row] == labels[coo.col]
     a = float(coo.data[same].sum()) / total
 
-    # b = (1/(2m)^2) * Σ_c (Σ_{i in c} d_i)^2
+    # b = (1/(2m)^2) * Σ_c (Σ_{i in c} d_i)^2.
+    # np.bincount(weights=...) is the fast, buffered scatter-add —
+    # materially quicker than np.add.at for large n.
     unique_labels, inv = np.unique(labels, return_inverse=True)
-    D = np.zeros(len(unique_labels), dtype=np.float64)
-    np.add.at(D, inv, d)
+    D = np.bincount(inv, weights=d, minlength=len(unique_labels))
     b = float(np.sum(D * D)) / (total * total)
     return a, b
 
@@ -161,7 +162,7 @@ def champ(
     key_added: str = 'champ',
     random_state: int = 0,
     verbose: bool = True,
-):
+) -> Tuple[anndata.AnnData, Tuple[float, float], pd.DataFrame]:
     r"""Pick the modularity-stablest Leiden partition via CHAMP
     (Weir et al. 2017).
 
@@ -247,23 +248,42 @@ def champ(
     if resolutions is None:
         resolutions = list(np.linspace(gamma_min, gamma_max, n_partitions))
     resolutions = sorted(float(np.round(r, 4)) for r in resolutions)
+    if len(resolutions) < 2:
+        raise ValueError(
+            "champ needs at least 2 distinct resolution values to "
+            "compare partitions; got "
+            f"{len(resolutions)} (after deduplication)."
+        )
 
     if verbose:
         print(f"{EMOJI['start']} CHAMP: scanning {len(resolutions)} "
                f"resolutions ∈ [{gamma_min:.2f}, {gamma_max:.2f}]")
 
     # 1. Generate candidate partitions, deduplicating identical ones.
+    # Each leiden invocation is intentionally silenced (we run leiden
+    # ~n_partitions times and its @monitor per-call SUMMARY boxes would
+    # drown out CHAMP's own progress). The outer `verbose` flag still
+    # controls CHAMP's own top-level messages.
     from ..pp import leiden as _leiden  # tracked; nesting guard silences
 
     TMP_KEY = '_champ_tmp'
+    # Save any pre-existing user column at TMP_KEY so our scratch slot
+    # doesn't silently overwrite it.
+    _preexisting_tmp = (adata.obs[TMP_KEY].copy()
+                         if TMP_KEY in adata.obs.columns else None)
+
     partitions: list[dict] = []
-    seen_signatures: dict[tuple, int] = {}
+    seen_signatures: dict[bytes, int] = {}
     for r in resolutions:
         with contextlib.redirect_stdout(io.StringIO()):
             _leiden(adata, resolution=r, key_added=TMP_KEY,
                     random_state=random_state)
-        labels = adata.obs[TMP_KEY].astype(int).values.copy()
-        sig = tuple(labels.tolist())
+        labels = np.ascontiguousarray(
+            adata.obs[TMP_KEY].astype(np.int32).values
+        )
+        # tobytes() is ~50× faster than tuple(labels.tolist()) for
+        # large n and gives the same uniqueness guarantee.
+        sig = labels.tobytes()
         if sig in seen_signatures:
             continue
         seen_signatures[sig] = len(partitions)
@@ -272,7 +292,10 @@ def champ(
             'labels': labels,
             'n_clusters': int(np.unique(labels).size),
         })
-    if TMP_KEY in adata.obs.columns:
+    # Restore or drop the scratch column.
+    if _preexisting_tmp is not None:
+        adata.obs[TMP_KEY] = _preexisting_tmp
+    elif TMP_KEY in adata.obs.columns:
         del adata.obs[TMP_KEY]
 
     if verbose:
@@ -281,17 +304,17 @@ def champ(
 
     # 2. Compute (a, b) for each unique partition.
     W = adata.obsp['connectivities']
-    bs = np.empty(len(partitions))
-    as_ = np.empty(len(partitions))
+    b_vals = np.empty(len(partitions))
+    a_vals = np.empty(len(partitions))
     for i, p in enumerate(partitions):
         a, b = _modularity_coefficients(W, p['labels'])
-        as_[i] = a
-        bs[i] = b
+        a_vals[i] = a
+        b_vals[i] = b
         p['a'] = a
         p['b'] = b
 
     # 3. Upper convex hull in (b, a) plane.
-    hull_idx = _upper_hull_indices(bs, as_)
+    hull_idx = _upper_hull_indices(b_vals, a_vals)
     H = len(hull_idx)
     if verbose:
         print(f"  {H} partitions on the upper convex hull (admissible)")
@@ -300,8 +323,8 @@ def champ(
     crossovers = []
     for k in range(H - 1):
         i, j = hull_idx[k], hull_idx[k + 1]
-        denom = bs[j] - bs[i]
-        crossovers.append(float((as_[j] - as_[i]) / denom)
+        denom = b_vals[j] - b_vals[i]
+        crossovers.append(float((a_vals[j] - a_vals[i]) / denom)
                             if denom != 0 else float('inf'))
 
     # 5. Per-hull-partition admissible γ-range.
@@ -346,8 +369,8 @@ def champ(
     )
     df = pd.DataFrame({
         'origin_resolution': [p['origin_resolution'] for p in partitions],
-        'a':                  as_,
-        'b':                  bs,
+        'a':                  a_vals,
+        'b':                  b_vals,
         'n_clusters':         [p['n_clusters'] for p in partitions],
         'on_hull':            on_hull,
         'gamma_lo':           gamma_lo,
@@ -355,7 +378,10 @@ def champ(
         'gamma_range':        widths,
     }).sort_values('b').reset_index(drop=True)
 
-    adata.uns['champ'] = {
+    # Honour key_added for the uns slot too — scanpy convention. A
+    # hard-coded 'champ' would clobber any previous run stored under a
+    # different user-chosen key.
+    adata.uns[key_added] = {
         'method': 'CHAMP (Weir et al. 2017)',
         'partitions':            df.to_dict('list'),
         'chosen_origin_resolution': float(best_partition['origin_resolution']),
@@ -366,7 +392,7 @@ def champ(
         'gamma_max':             float(gamma_max),
     }
     add_reference(
-        adata, 'champ',
+        adata, key_added,
         f'CHAMP partition (γ-range [{best_lo:.3f}, {best_hi:.3f}], '
         f'{best_partition["n_clusters"]} clusters)',
     )

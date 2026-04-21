@@ -104,12 +104,27 @@ def test_upper_hull_filters_dominated_points():
     assert hull == [0, 2]
 
 
-def test_upper_hull_keeps_all_when_collinear_above():
+def test_upper_hull_keeps_strictly_concave_points():
+    """Three points with strictly decreasing slope between consecutive
+    pairs → all three lie on the upper hull."""
     from omicverse.pp._champ import _upper_hull_indices
-    # Three points strictly increasing in both b and a — all on hull.
+    # Slopes: (2-0)/(1-0)=2, (3-2)/(2-1)=1 — strictly decreasing → concave.
     hull = _upper_hull_indices(np.array([0.0, 1.0, 2.0]),
                                 np.array([0.0, 2.0, 3.0]))
     assert hull == [0, 1, 2]
+
+
+def test_upper_hull_drops_collinear_interior_point():
+    """Three collinear points → Andrew's strict monotone chain drops
+    the middle one (cross product is exactly 0 → popped). This is the
+    intended strict-hull behaviour for CHAMP: the interior collinear
+    partition gives the same Q as the line through its neighbours, so
+    excluding it from the hull doesn't change the admissible
+    envelope."""
+    from omicverse.pp._champ import _upper_hull_indices
+    hull = _upper_hull_indices(np.array([0.0, 1.0, 2.0]),
+                                np.array([0.0, 1.0, 2.0]))
+    assert hull == [0, 2]
 
 
 # ─────────────────────────── end-to-end ───────────────────────────────────────
@@ -117,24 +132,37 @@ def test_upper_hull_keeps_all_when_collinear_above():
 
 def test_champ_picks_a_hull_partition(adata_with_neighbors):
     """The chosen partition must be on the convex hull (never a
-    dominated one)."""
+    dominated one). Verify by computing the chosen partition's own
+    (a, b) and matching them against a hull row — label equality
+    would be a weaker check because two resolutions can yield the
+    same n_clusters without being the same partition."""
     import omicverse as ov
+    from omicverse.pp._champ import _modularity_coefficients
 
     a = adata_with_neighbors.copy()
     _, (lo, hi), df = ov.pp.champ(
         a, n_partitions=12, gamma_min=0.1, gamma_max=2.0,
         random_state=0, verbose=False,
     )
-    # Chosen γ-range was a positive interval.
     assert hi >= lo
-    # The widest-range row (i.e. the chosen partition) must be on the hull.
-    # The chosen partition's labels equal what's written to obs['champ'].
-    chosen_n = int(a.obs["champ"].nunique())
-    on_hull = df[df["on_hull"]]
-    assert chosen_n in on_hull["n_clusters"].tolist()
+
+    chosen_labels = a.obs["champ"].astype(int).values
+    a_chosen, b_chosen = _modularity_coefficients(
+        a.obsp["connectivities"], chosen_labels,
+    )
+    hull = df[df["on_hull"]]
+    # Floating-point match to some hull row's (a, b).
+    matches = ((hull["a"] - a_chosen).abs() < 1e-9) & \
+              ((hull["b"] - b_chosen).abs() < 1e-9)
+    assert matches.any(), (
+        f"chosen (a, b) = ({a_chosen:.6g}, {b_chosen:.6g}) "
+        f"does not match any hull row:\n{hull}"
+    )
 
 
-def test_champ_writes_uns_payload(adata_with_neighbors):
+def test_champ_writes_uns_payload_under_key_added(adata_with_neighbors):
+    """``uns`` slot honours ``key_added`` (scanpy convention) so two
+    calls with different ``key_added`` don't clobber each other."""
     import omicverse as ov
 
     a = adata_with_neighbors.copy()
@@ -143,14 +171,39 @@ def test_champ_writes_uns_payload(adata_with_neighbors):
         key_added="champ_clusters",
     )
     assert "champ_clusters" in a.obs.columns
-    payload = a.uns["champ"]
+    assert "champ_clusters" in a.uns, \
+        "uns slot should follow key_added, not be hardcoded to 'champ'"
+    payload = a.uns["champ_clusters"]
     assert "Weir" in payload["method"]
-    assert "chosen_n_clusters" in payload
-    assert "chosen_gamma_range" in payload
+    assert {"chosen_n_clusters", "chosen_gamma_range",
+            "chosen_origin_resolution"}.issubset(payload)
     assert payload["chosen_n_clusters"] == int(a.obs["champ_clusters"].nunique())
     parts_df = pd.DataFrame(payload["partitions"])
     assert {"a", "b", "n_clusters", "on_hull",
             "gamma_lo", "gamma_hi", "gamma_range"}.issubset(parts_df.columns)
+
+
+def test_champ_preserves_user_column_at_scratch_key(adata_with_neighbors):
+    """If the caller already has obs['_champ_tmp'], CHAMP must restore
+    it — the scratch slot is an internal detail, not a licence to
+    clobber user state."""
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    a.obs["_champ_tmp"] = np.arange(a.n_obs)  # user-owned column
+    before = a.obs["_champ_tmp"].copy()
+    ov.pp.champ(a, n_partitions=6, random_state=0, verbose=False)
+    assert "_champ_tmp" in a.obs.columns
+    assert (a.obs["_champ_tmp"].values == before.values).all()
+
+
+def test_champ_rejects_single_resolution(adata_with_neighbors):
+    """A single resolution can't define a hull — raise clearly."""
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    with pytest.raises(ValueError, match="at least 2"):
+        ov.pp.champ(a, resolutions=[0.5], random_state=0, verbose=False)
 
 
 def test_champ_cleans_temp_obs_cols(adata_with_neighbors):

@@ -113,6 +113,7 @@ from ._venn import venny4py
 from ._lsi import Array, lsi, tfidf
 from ._neighboors import neighbors,calc_kBET,calc_kSIM
 from ._gene_id_conversion import _infer_species_and_release, convert2gene_symbol, convert2symbol, id2symbol, convert2gene_id, symbol2id
+from ._metabolights import load_metabolights
 from ._ovagent_lookup import (
     RegistryScanner,
     initialize_skill_registry,
@@ -190,6 +191,8 @@ verifier = _verifier_module
 
 # Explicit public exports for stable, non-wildcard imports
 __all__ = [
+    # @ _metabolights
+    "load_metabolights",
     # @ _data
     "read",
     "read_csv",

@@ -363,3 +363,215 @@ def vip_bar(
     ax.set_xlabel("VIP score")
     ax.set_ylabel("")
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# sample-QC scatter — Hotelling T² vs DModX
+# ---------------------------------------------------------------------------
+@register_function(
+    aliases=['sample_qc_plot', 'plot_sample_qc',
+             'hotelling_dmodx_scatter'],
+    category='metabolomics',
+    description='Scatter of Hotelling T² vs DModX with the alpha-level '
+                'critical boundaries, highlighting flagged outlier samples. '
+                'Pair with metabol.sample_qc.',
+    examples=[
+        "qc = ov.metabol.sample_qc(adata); "
+        "ov.metabol.sample_qc_plot(qc)",
+    ],
+    related=['metabol.sample_qc'],
+)
+def sample_qc_plot(
+    qc_df,
+    *,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (5.0, 4.0),
+    normal_color: str = "#2980b9",
+    outlier_color: str = "#c0392b",
+):
+    """Scatter of Hotelling T² vs DModX with critical-value lines."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    flag = qc_df["is_outlier"].to_numpy()
+    ax.scatter(qc_df["T2"][~flag], qc_df["DModX"][~flag],
+               c=normal_color, s=28, edgecolor="k", alpha=0.7,
+               label="normal")
+    ax.scatter(qc_df["T2"][flag], qc_df["DModX"][flag],
+               c=outlier_color, s=55, edgecolor="k", label="outlier")
+    ax.axvline(qc_df["T2_crit"].iloc[0], color="grey", ls="--", lw=1)
+    ax.axhline(qc_df["DModX_crit"].iloc[0], color="grey", ls="--", lw=1)
+    ax.set_xlabel("Hotelling T²")
+    ax.set_ylabel("DModX")
+    ax.legend(loc="best", frameon=False)
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# DGCA class counts
+# ---------------------------------------------------------------------------
+@register_function(
+    aliases=['dgca_class_bar', 'plot_dgca_classes', 'dc_class_counts'],
+    category='metabolomics',
+    description='Bar chart of the DGCA class distribution '
+                '(counts of +/+, +/0, +/-, -/+, ...) returned by '
+                'metabol.dgca.',
+    examples=[
+        "dc = ov.metabol.dgca(adata, group_col='group'); "
+        "ov.metabol.dgca_class_bar(dc)",
+    ],
+    related=['metabol.dgca', 'metabol.corr_network_plot'],
+)
+def dgca_class_bar(
+    dc_df,
+    *,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (6.0, 3.5),
+    log: bool = True,
+):
+    """Bar chart of DC-class counts (+/+, +/0, +/-, -/+, ...)."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    counts = dc_df["dc_class"].value_counts()
+    order = [c for c in counts.index if c != "0/0"] + (
+        ["0/0"] if "0/0" in counts.index else [])
+    counts = counts.reindex(order)
+    palette = {
+        "+/+": "#27ae60", "-/-": "#8e44ad",
+        "+/-": "#c0392b", "-/+": "#c0392b",
+        "+/0": "#2980b9", "0/+": "#3498db",
+        "-/0": "#e67e22", "0/-": "#f39c12",
+        "0/0": "#bdc3c7",
+    }
+    colors = [palette.get(c, "#7f8c8d") for c in counts.index]
+    ax.bar(counts.index, counts.values, color=colors, edgecolor="k")
+    if log:
+        ax.set_yscale("log")
+    ax.set_ylabel("number of pairs")
+    ax.set_xlabel("DC class (A=group_a / B=group_b)")
+    for lbl in ax.get_xticklabels():
+        lbl.set_rotation(0)
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Correlation network plot
+# ---------------------------------------------------------------------------
+@register_function(
+    aliases=['corr_network_plot', 'plot_correlation_network',
+             '相关网络图'],
+    category='metabolomics',
+    description='Draw a metabolite-correlation edge DataFrame (from '
+                'metabol.corr_network or a filtered metabol.dgca) as a '
+                'NetworkX spring-layout plot. Edge color encodes sign of '
+                'r; width scales with |r|.',
+    examples=[
+        "edges = ov.metabol.corr_network(adata, group_col='group', "
+        "group='case'); ov.metabol.corr_network_plot(edges)",
+    ],
+    related=['metabol.corr_network', 'metabol.dgca'],
+)
+def corr_network_plot(
+    edges_df,
+    *,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (6.5, 5.5),
+    layout: str = "spring",
+    node_size: int = 70,
+    node_color: str = "white",
+    node_edge_color: str = "#34495e",
+    edge_width_scale: float = 2.5,
+    r_column: str = "r",
+    seed: int = 0,
+    with_labels: bool = True,
+    label_font_size: int = 7,
+):
+    """Draw an edge DataFrame as a NetworkX spring-layout plot."""
+    import networkx as nx
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    if edges_df.empty:
+        ax.text(0.5, 0.5, "no edges above the threshold",
+                ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return fig, ax
+    G = nx.from_pandas_edgelist(
+        edges_df, source="feature_a", target="feature_b",
+        edge_attr=True,
+    )
+    if layout == "spring":
+        pos = nx.spring_layout(G, seed=seed, k=0.7)
+    elif layout == "circular":
+        pos = nx.circular_layout(G)
+    else:
+        pos = nx.kamada_kawai_layout(G)
+
+    edge_colors = []
+    edge_widths = []
+    for u, v, data in G.edges(data=True):
+        r = float(data.get(r_column, 0.0))
+        edge_colors.append("#c0392b" if r > 0 else "#2980b9")
+        edge_widths.append(max(abs(r), 0.1) * edge_width_scale)
+    nx.draw_networkx_edges(G, pos, edge_color=edge_colors,
+                           width=edge_widths, alpha=0.75, ax=ax)
+    nx.draw_networkx_nodes(G, pos, node_size=node_size,
+                           node_color=node_color,
+                           edgecolors=node_edge_color, ax=ax)
+    if with_labels:
+        nx.draw_networkx_labels(G, pos, font_size=label_font_size, ax=ax)
+    ax.set_axis_off()
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# ASCA variance-explained bar
+# ---------------------------------------------------------------------------
+@register_function(
+    aliases=['asca_variance_bar', 'plot_asca_effects', 'ASCA方差'],
+    category='metabolomics',
+    description='Horizontal bar chart of per-effect variance-explained '
+                'fractions from an ASCAResult, plus the residual.',
+    examples=[
+        "res = ov.metabol.asca(adata, factors=['treatment', 'time']); "
+        "ov.metabol.asca_variance_bar(res)",
+    ],
+    related=['metabol.asca'],
+)
+def asca_variance_bar(
+    asca_result,
+    *,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (5.5, 3.0),
+):
+    """Horizontal bars of per-effect variance-explained fractions."""
+    import numpy as np
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+    names = list(asca_result.effects.keys())
+    fracs = [asca_result.effects[n].variance_explained for n in names]
+    residual_frac = (
+        asca_result.residual_ss / asca_result.total_ss
+        if asca_result.total_ss > 0 else 0.0
+    )
+    names.append("residual")
+    fracs.append(residual_frac)
+    colors = ["#2980b9"] * (len(names) - 1) + ["#bdc3c7"]
+    y = np.arange(len(names))
+    ax.barh(y, fracs, color=colors, edgecolor="k")
+    ax.set_yticks(y)
+    ax.set_yticklabels(names)
+    ax.invert_yaxis()
+    ax.set_xlabel("variance explained (fraction of total SS)")
+    for i, f in enumerate(fracs):
+        ax.text(f + 0.005, i, f"{f*100:.1f}%",
+                va="center", ha="left", fontsize=8)
+    return fig, ax

@@ -328,7 +328,14 @@ class GibbsSampler:
                 X_input = [X[i, :] for i in np.arange(X.shape[0])]
                 star_input = zip(X_input, repeat(phi), repeat(alpha), repeat(gibbs_idx), repeat(seed))
                 gibbs_list = pool.starmap(GibbsSampler.sample_theta_n , tqdm.tqdm(star_input, total=len(X_input)))
-            return ThetaPost.new(self.X.index, self.X.columns, gibbs_list)
+            # ThetaPost indexes columns by cell type (shape of theta_n),
+            # not by gene. Earlier revisions passed ``self.X.columns`` here,
+            # which left the theta buffer at shape (n_samples, n_genes);
+            # when gibbs_list[i]['theta_n'] came back at shape (n_celltypes,)
+            # it broadcast-errored as
+            #   "could not broadcast input array from shape (K,) into (G,)"
+            # See omicverse/omicverse#612.
+            return ThetaPost.new(self.X.index, phi.index, gibbs_list)
 
 
     def run_gibbs_refTumor(self):

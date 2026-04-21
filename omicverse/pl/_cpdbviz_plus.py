@@ -14,6 +14,7 @@ import warnings
 warnings.filterwarnings('ignore')
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.colors as mcolors
+from ._heatmap_marsilea import _warn_if_broken_marsilea_version
 try:
     import marsilea as ma
     import marsilea.plotter as mp
@@ -89,7 +90,7 @@ def _constrain_texts_to_axes(ax, texts, *, x_pad=0.03, y_pad=0.04):
             text.set_va("center")
 
 
-def _repel_texts(ax, texts, *, font_stroke=2.6):
+def _repel_texts(ax, texts, *, font_stroke=2.6, x_values=None, y_values=None, arrow=False):
     text_items = [text for text in texts if str(text.get_text()).strip()]
     if not text_items:
         return
@@ -100,15 +101,32 @@ def _repel_texts(ax, texts, *, font_stroke=2.6):
     except ImportError:
         warnings.warn("adjustText library not found. Using deterministic fallback label offsets instead.")
     else:
+        adjust_kwargs = {
+            "ax": ax,
+            "expand_points": (1.28, 1.42),
+            "expand_text": (1.24, 1.48),
+            "force_points": 0.75,
+            "force_text": 0.72,
+            "force_explode": 0.35,
+            "avoid_self": True,
+            "ensure_inside_axes": True,
+            "arrowprops": (
+                {
+                    "arrowstyle": "-",
+                    "color": "#8A8A8A",
+                    "alpha": 0.58,
+                    "lw": 0.75,
+                }
+                if arrow
+                else None
+            ),
+        }
+        if x_values is not None and y_values is not None:
+            adjust_kwargs["x"] = list(x_values)
+            adjust_kwargs["y"] = list(y_values)
         adjust_text(
             text_items,
-            ax=ax,
-            expand_points=(1.2, 1.3),
-            expand_text=(1.18, 1.35),
-            force_points=0.5,
-            force_text=0.5,
-            ensure_inside_axes=False,
-            arrowprops=None,
+            **adjust_kwargs,
         )
 
     _constrain_texts_to_axes(ax, text_items)
@@ -563,7 +581,9 @@ class CellChatVizPlus:
                 signaling_str = ', '.join(signaling) if len(signaling) <= 3 else f"{len(signaling)} pathways"
                 title_name += f"\nSignaling: {signaling_str}"
         
-        ax.set_title(title_name, fontsize=fontsize + 2, pad=20)
+        ax.set_title("")
+        fig.suptitle(title_name, fontsize=fontsize + 1, y=0.97)
+        fig.subplots_adjust(top=0.78)
         
         # Add cell type color legend
         if show_legend:
@@ -710,6 +730,8 @@ class CellChatVizPlus:
             from sklearn.preprocessing import normalize
         except ImportError:
             raise ImportError("marsilea and sklearn packages are required. Please install them: pip install marsilea scikit-learn")
+
+        _warn_if_broken_marsilea_version(ma)
         
         # Handle sender cell types
         if sources_use is None:
@@ -2635,15 +2657,26 @@ class CellChatVizPlus:
             signaling=signaling
         )
         
+        signaling_is_explicit = signaling is not None
+
         # Create AnnData object for filtering
         ad_signal = ad.AnnData(cell_matrix)
         ad_signal.var['mean'] = ad_signal.X.mean(axis=0)
         ad_signal.var['min'] = ad_signal.X.min(axis=0)
+        ad_signal.var['max'] = ad_signal.X.max(axis=0)
         
-        # Filter pathways with low signaling strength
-        valid_pathways = ad_signal.var['min'][ad_signal.var['min'] > min_threshold].index
+        # When pathways are explicitly requested upstream (for example via top-N
+        # auto-selection in ccc_heatmap), keep all non-empty pathways rather than
+        # applying a second aggressive min-across-cell-types filter that can
+        # collapse the heatmap to a single row.
+        if signaling_is_explicit:
+            valid_pathways = ad_signal.var.index[ad_signal.var['max'] > 0]
+        else:
+            valid_pathways = ad_signal.var.index[ad_signal.var['min'] > min_threshold]
         
         if len(valid_pathways) == 0:
+            if signaling_is_explicit:
+                raise ValueError("No signaling pathways remain after filtering empty pathway rows.")
             raise ValueError(f"No pathways found with minimum signal strength > {min_threshold}")
         
         # Get filtered data matrix (transpose: pathway x cell type)
@@ -2699,7 +2732,13 @@ class CellChatVizPlus:
             h.add_title(auto_title, fontsize=fontsize + 2, pad=0.02)
         
         # Render figure
-        h.render()
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Using categorical units to plot a list of strings that are all parsable as floats or dates.*",
+                category=UserWarning,
+            )
+            h.render()
         
         # Save figure
         if save:
@@ -2843,7 +2882,7 @@ class CellChatVizPlus:
         ax1.set_yticklabels(lr_contrib['lr_pair'], fontsize=font_size)
         ax1.set_xlabel('Contribution Score', fontsize=font_size + 2)
         ax1.set_title('Top Contributing L-R Pairs', fontsize=font_size + 2)
-        ax1.grid(axis='x', alpha=0.3)
+        ax1.grid(axis='x', alpha=0.22, linewidth=0.7)
         
         # 右图：按信号通路分组的贡献
         pathway_contrib = df_contrib.groupby('pathway')['contribution'].sum().sort_values(ascending=False)
@@ -3625,7 +3664,7 @@ class CellChatVizPlus:
         
         # 添加数值标签
         for i, (bar, percent) in enumerate(zip(bars, top_df['contribution_percent'])):
-            ax1.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2, 
+            ax1.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2, 
                     f'{percent:.1f}%', va='center', fontsize=9)
         
         # 右图：显著性 vs 强度散点图
@@ -3663,7 +3702,15 @@ class CellChatVizPlus:
         ax2.set_ylabel('Number of Significant Cell Pairs')
         ax2.set_title('L-R Pair Activity vs Significance')
         ax2.margins(x=0.12, y=0.18)
-        _repel_texts(ax2, texts, font_stroke=2.5)
+        ax2.grid(True, alpha=0.22, linewidth=0.7)
+        _repel_texts(
+            ax2,
+            texts,
+            font_stroke=2.5,
+            x_values=top_df['total_strength'].astype(float).to_numpy(),
+            y_values=top_df['significant_pairs'].astype(float).to_numpy(),
+            arrow=True,
+        )
         
         # 添加colorbar
         cbar = plt.colorbar(scatter, ax=ax2)

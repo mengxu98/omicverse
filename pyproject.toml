@@ -75,7 +75,7 @@ dependencies = [
     'tqdm',
     'requests>=2.0',
     'transformers>=0.30',
-    'marsilea',
+    'marsilea!=0.5.6',
     #'wandb',
     'openai>=1.0',
     'omicverse-skills>=0.2.0',

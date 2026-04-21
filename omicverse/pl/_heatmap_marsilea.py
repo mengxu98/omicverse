@@ -31,6 +31,19 @@ def _import_marsilea():
     return ma, mp
 
 
+def _warn_if_broken_marsilea_version(ma) -> None:
+    marsilea_version = getattr(ma, "__version__", "")
+    if marsilea_version.startswith("0.5.6"):
+        import warnings
+
+        warnings.warn(
+            "marsilea 0.5.6 has an upstream legend regression that can hide "
+            "SizedHeatmap colorbars. Please upgrade marsilea to 0.5.7 or newer.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
 def _resolve_palette(n_colors):
     if n_colors <= len(palette_28):
         return palette_28[:n_colors]
@@ -214,8 +227,6 @@ def _draw_custom_legends(
                 except Exception:
                     pass
 
-    # Measure the occupied plotting area first so the custom legend column can
-    # be placed just outside the visible heatmap content.
     content_x1 = 0.0
     content_y0, content_y1 = 1.0, 0.0
     for ax in fig.axes:
@@ -239,8 +250,6 @@ def _draw_custom_legends(
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
 
-    # Assemble the legend stack off-canvas to measure its footprint without
-    # disturbing the original plot layout.
     temp_ax = fig.add_axes([0, 0, 1, 1])
     temp_ax.set_axis_off()
 
@@ -267,8 +276,6 @@ def _draw_custom_legends(
     legend_width_frac = (extent.xmax - extent.xmin) / (fig_w * dpi)
     temp_ax.remove()
 
-    # Reserve only the width that the stacked legends actually need, then draw
-    # them in a dedicated axis to keep titles and font styling consistent.
     pad_frac = pad / fig_w
     legend_x = content_x1 + pad_frac
     legend_width = min(legend_width_frac + 0.02, 0.35)

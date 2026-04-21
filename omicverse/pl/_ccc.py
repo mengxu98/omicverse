@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import textwrap
 import warnings
+import io
+from contextlib import nullcontext, redirect_stdout
 from typing import Mapping, Sequence, Literal
 
 import anndata
@@ -12,6 +14,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import colors as mcolors
+from matplotlib.colors import Normalize
 from matplotlib import patheffects
 from matplotlib.patches import FancyArrowPatch, PathPatch, Rectangle
 from matplotlib.path import Path
@@ -26,8 +29,12 @@ from ._heatmap_marsilea import (
     _import_marsilea,
     _render_plot,
     _style_heatmap_axes,
+    _warn_if_broken_marsilea_version,
 )
 from ._palette import palette_28, palette_56, palette_112
+
+_COMM_REQUIRED_OBS = ("sender", "receiver")
+_COMM_REQUIRED_LAYERS = ("means", "pvalues")
 
 
 def _to_dense(matrix):
@@ -51,8 +58,8 @@ def _pick_first_available(frame: pd.DataFrame, candidates: Sequence[str], fallba
 
 
 def _ensure_comm_adata(adata: anndata.AnnData) -> None:
-    missing_obs = [key for key in ("sender", "receiver") if key not in adata.obs.columns]
-    missing_layers = [key for key in ("means", "pvalues") if key not in adata.layers]
+    missing_obs = [key for key in _COMM_REQUIRED_OBS if key not in adata.obs.columns]
+    missing_layers = [key for key in _COMM_REQUIRED_LAYERS if key not in adata.layers]
 
     if missing_obs:
         raise ValueError(
@@ -64,6 +71,47 @@ def _ensure_comm_adata(adata: anndata.AnnData) -> None:
             "Communication AnnData is missing required layers: "
             f"{missing_layers}. Expected both 'means' and 'pvalues'."
         )
+
+
+def _is_comm_adata(adata: anndata.AnnData) -> bool:
+    if not isinstance(adata, anndata.AnnData):
+        return False
+    has_obs = all(key in adata.obs.columns for key in _COMM_REQUIRED_OBS)
+    has_layers = all(key in adata.layers for key in _COMM_REQUIRED_LAYERS)
+    return has_obs and has_layers
+
+
+def _resolve_comm_adata(
+    adata: anndata.AnnData,
+    *,
+    arg_name: str,
+    result_uns_key: str = "liana_res",
+    score_key: str = "specificity_rank",
+    pvalue_key: str = "specificity_rank",
+    inverse_score: bool = True,
+    inverse_pvalue: bool = False,
+    classification: str | Mapping[str, str] | None = None,
+    classification_reference: str | pd.DataFrame | None = "cellchat",
+    classification_fallback: str | None = "family",
+) -> anndata.AnnData:
+    from ..single._comm import to_comm_adata
+
+    try:
+        return to_comm_adata(
+            adata,
+            result_uns_key=result_uns_key,
+            score_key=score_key,
+            pvalue_key=pvalue_key,
+            inverse_score=inverse_score,
+            inverse_pvalue=inverse_pvalue,
+            classification=classification,
+            classification_reference=classification_reference,
+            classification_fallback=classification_fallback,
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        if _is_comm_adata(adata):
+            return adata
+        raise type(exc)(f"{exc} (while resolving `{arg_name}`)").with_traceback(exc.__traceback__)
 
 
 def _normalize_use_arg(values) -> list[str] | None:
@@ -115,6 +163,19 @@ def _require_use_argument(plot_type: str, arg_name: str, values) -> list[str]:
     if normalized is None:
         raise ValueError(f"`{arg_name}` is required when `plot_type='{plot_type}'`.")
     return normalized
+
+
+def _validate_plot_type(plot_type: str, allowed: Sequence[str], *, func_name: str) -> None:
+    if plot_type not in allowed:
+        allowed_str = ", ".join(f"'{item}'" for item in allowed)
+        raise ValueError(f"Unsupported `plot_type='{plot_type}'` for `{func_name}`. Allowed values are: {allowed_str}.")
+
+
+def _validate_display_by(display_by: str, *, func_name: str) -> None:
+    allowed = ("aggregation", "interaction")
+    if display_by not in allowed:
+        allowed_str = ", ".join(f"'{item}'" for item in allowed)
+        raise ValueError(f"Unsupported `display_by='{display_by}'` for `{func_name}`. Allowed values are: {allowed_str}.")
 
 
 def _aggregate_series(grouped, value: Literal["sum", "mean", "max", "count"], *, field: str = "score") -> pd.Series:
@@ -640,6 +701,7 @@ def _draw_flow_stage_node(
     label_mode: Literal["center", "side"] = "center",
     text_offset: float = 0.055,
     text_y_offset: float = 0.0,
+    text_align: Literal["left", "right"] = "left",
     facecolor: str = "white",
     edgecolor: str = "#6E6E6E",
 ) -> None:
@@ -666,11 +728,15 @@ def _draw_flow_stage_node(
                 zorder=3,
             )
         )
+        if text_align == "right":
+            text_x = x_coord - marker_width / 2.0 - text_offset
+        else:
+            text_x = x_coord + marker_width / 2.0 + text_offset
         ax.text(
-            x_coord + text_offset,
+            text_x,
             y_coord + text_y_offset,
             wrapped_label,
-            ha="left",
+            ha=text_align,
             va="center",
             fontsize=max(7.0, fontsize - 0.2),
             zorder=4,
@@ -730,8 +796,6 @@ def _build_flow_plot_frames(
         if plot_df.empty:
             raise ValueError("No interaction-level communication edges remain after filtering.")
 
-        # Keep the interaction-flow panels readable by pruning each ligand-receptor
-        # stage to its strongest sender/receiver branches.
         branch_limit = max(3, min(5, int(np.ceil(np.sqrt(max(int(top_n), 1))))))
         sender_keep = (
             plot_df.groupby(["interaction_label", "sender"], observed=True)["weight"]
@@ -896,6 +960,8 @@ def _plot_heatmap_matrix(
     col_wrap_width: int = 18,
     max_col_labels: int = 18,
     clip_quantile: float | None = None,
+    show_row_names: bool = False,
+    show_col_names: bool = False,
 ):
     ma, mp = _import_marsilea()
     display_matrix = matrix.copy()
@@ -953,6 +1019,8 @@ def _plot_heatmap_matrix(
         )
     if "cell" in left_annos and row_palette is not None:
         heatmap.add_left(mp.Colors(row_names, palette=row_palette), size=0.2, pad=0.04, legend=False)
+    if show_row_names:
+        heatmap.add_left(mp.Labels(row_names, fontsize=9), pad=0.08)
     if "cell" in right_annos and row_palette is not None:
         heatmap.add_right(mp.Colors(row_names, palette=row_palette), size=0.12, pad=0.03, legend=False)
     if "bar" in right_annos and row_totals is not None:
@@ -984,6 +1052,8 @@ def _plot_heatmap_matrix(
         heatmap.add_top(mp.Colors(col_names, palette=col_palette), size=0.18, pad=0.03)
     if "cell" in bottom_annos and col_palette is not None:
         heatmap.add_bottom(mp.Colors(col_names, palette=col_palette), size=0.12, pad=0.03, legend=False)
+    if show_col_names:
+        heatmap.add_bottom(mp.Labels(col_names, fontsize=9), pad=0.08)
     if "bar" in bottom_annos and col_totals is not None:
         heatmap.add_bottom(
             mp.Numbers(
@@ -1039,6 +1109,29 @@ def _largest_content_axis(fig):
     if not content_axes:
         return fig.axes[0]
     return max(content_axes, key=lambda axis: axis.get_position().width * axis.get_position().height)
+
+
+def _draw_network_column_headers(
+    ax,
+    column_titles: Sequence[tuple[float, str]],
+    *,
+    x_min: float,
+    x_max: float,
+    y_axes: float = 0.90,
+    fontsize: int = 11,
+) -> None:
+    x_span = max(float(x_max) - float(x_min), 1e-9)
+    for x_coord, label in column_titles:
+        x_frac = (float(x_coord) - float(x_min)) / x_span
+        ax.text(
+            x_frac,
+            y_axes,
+            str(label),
+            ha="center",
+            va="bottom",
+            fontsize=fontsize,
+            transform=ax.transAxes,
+        )
 
 
 def _render_plotter_figure(plotter, *, title: str | None = None, add_custom_legends: bool = False):
@@ -1133,19 +1226,22 @@ def _pathway_summary_table(
     strength_threshold: float = 0.5,
     pvalue_threshold: float = 0.05,
     min_significant_pairs: int = 1,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     viz = _build_cellchatviz(adata, palette=palette)
-    pathway_comm = viz.compute_pathway_communication(
-        method=pathway_method,
-        min_lr_pairs=min_lr_pairs,
-        min_expression=min_expression,
-    )
-    _, summary = viz.get_significant_pathways_v2(
-        pathway_comm,
-        strength_threshold=strength_threshold,
-        pvalue_threshold=pvalue_threshold,
-        min_significant_pairs=min_significant_pairs,
-    )
+    stdout_context = nullcontext() if verbose else redirect_stdout(io.StringIO())
+    with stdout_context:
+        pathway_comm = viz.compute_pathway_communication(
+            method=pathway_method,
+            min_lr_pairs=min_lr_pairs,
+            min_expression=min_expression,
+        )
+        _, summary = viz.get_significant_pathways_v2(
+            pathway_comm,
+            strength_threshold=strength_threshold,
+            pvalue_threshold=pvalue_threshold,
+            min_significant_pairs=min_significant_pairs,
+        )
     if summary is None or len(summary) == 0:
         raise ValueError("No signaling pathways remain after applying the pathway summary thresholds.")
     summary = summary.copy()
@@ -1332,6 +1428,708 @@ def _communication_matrix(
     return matrix, size_matrix, label
 
 
+def _rank_and_filter_long_df(
+    long_df: pd.DataFrame,
+    *,
+    color_by: Literal["score", "pvalue"],
+    top_n: int | None,
+    interaction_use=None,
+    pair_lr_use=None,
+) -> pd.DataFrame:
+    data = long_df.copy()
+    if interaction_use is not None or pair_lr_use is not None:
+        return data
+    if top_n is not None and top_n > 0:
+        score_col = "score" if color_by == "score" else "neglog10_pvalue"
+        keep = (
+            data.groupby("interaction", observed=True)[score_col]
+            .sum()
+            .sort_values(ascending=False)
+            .head(int(top_n))
+            .index
+        )
+        data = data.loc[data["interaction"].isin(keep)].copy()
+    return data
+
+
+def _normalized_marker_sizes(values: pd.Series, *, min_size: float = 20.0, max_size: float = 160.0) -> np.ndarray:
+    numeric = pd.to_numeric(values, errors="coerce").fillna(0.0).astype(float)
+    if numeric.empty:
+        return np.array([], dtype=float)
+    min_value = float(numeric.min())
+    max_value = float(numeric.max())
+    if np.isclose(min_value, max_value):
+        return np.full(len(numeric), (min_size + max_size) / 2.0, dtype=float)
+    scaled = (numeric - min_value) / (max_value - min_value)
+    return (min_size + scaled.to_numpy(dtype=float) * (max_size - min_size)).astype(float)
+
+
+def _facet_row_spacing(*, nrows: int, spacing: float = 0.16) -> float:
+    if nrows <= 1:
+        return 0.0
+    return float(spacing)
+
+
+def _last_visible_row_per_column(n_items: int, ncols: int) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    for idx in range(max(n_items, 0)):
+        col_idx = idx % max(ncols, 1)
+        row_idx = idx // max(ncols, 1)
+        mapping[col_idx] = row_idx
+    return mapping
+
+
+def _dotplot_left_margin(interactions: Sequence[str]) -> float:
+    max_label_len = max((len(str(label)) for label in interactions), default=0)
+    return float(np.clip(0.15 + 0.0045 * max_label_len, 0.17, 0.3))
+
+
+def _measured_dotplot_left_layout(
+    fig: plt.Figure,
+    axes: Sequence[plt.Axes],
+    fallback: float,
+) -> tuple[float, float]:
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    except Exception:
+        return fallback, max(fallback - 0.08, 0.01)
+
+    max_width_px = 0.0
+    for ax in axes:
+        if not ax.get_visible():
+            continue
+        for label in ax.get_yticklabels():
+            if not label.get_text():
+                continue
+            bbox = label.get_window_extent(renderer=renderer)
+            max_width_px = max(max_width_px, float(bbox.width))
+
+    if max_width_px <= 0:
+        return fallback, max(fallback - 0.08, 0.01)
+
+    fig_width_px = fig.get_figwidth() * fig.dpi
+    label_width_frac = max_width_px / max(fig_width_px, 1e-6)
+    measured_margin = float(max(fallback, min(label_width_frac + 0.05, 0.38)))
+    ylabel_x = float(max(0.01, measured_margin - label_width_frac - 0.035))
+    return measured_margin, ylabel_x
+
+
+def _measured_axis_text_extent(
+    fig: plt.Figure,
+    ax: plt.Axes,
+    *,
+    side: Literal["left", "right"],
+) -> float | None:
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    except Exception:
+        return None
+
+    extents: list[float] = []
+    ticklabels = ax.get_yticklabels()
+    for label in ticklabels:
+        if not label.get_text():
+            continue
+        bbox = label.get_window_extent(renderer=renderer)
+        if side == "left":
+            extents.append(float(bbox.x0))
+        else:
+            extents.append(float(bbox.x1))
+
+    ylabel = ax.yaxis.label
+    if ylabel is not None and ylabel.get_text():
+        bbox = ylabel.get_window_extent(renderer=renderer)
+        if side == "left":
+            extents.append(float(bbox.x0))
+        else:
+            extents.append(float(bbox.x1))
+
+    if not extents:
+        return None
+    return min(extents) if side == "left" else max(extents)
+
+
+def _axes_text_boundary(
+    fig: plt.Figure,
+    axes: Sequence[plt.Axes],
+    *,
+    side: Literal["left", "right"],
+) -> float | None:
+    extents = [
+        extent
+        for extent in (_measured_axis_text_extent(fig, ax, side=side) for ax in axes)
+        if extent is not None
+    ]
+    if not extents:
+        return None
+    return min(extents) if side == "left" else max(extents)
+
+
+def _axes_union_tightbbox(
+    fig: plt.Figure,
+    axes: Sequence[plt.Axes],
+) -> tuple[float, float, float, float] | None:
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    except Exception:
+        return None
+
+    bboxes = [ax.get_tightbbox(renderer=renderer) for ax in axes if ax.get_visible()]
+    bboxes = [bbox for bbox in bboxes if bbox is not None]
+    if not bboxes:
+        return None
+
+    fig_bbox = fig.bbox
+    if fig_bbox.width <= 0 or fig_bbox.height <= 0:
+        return None
+
+    x0 = min(float(bbox.x0) for bbox in bboxes) / fig_bbox.width
+    y0 = min(float(bbox.y0) for bbox in bboxes) / fig_bbox.height
+    x1 = max(float(bbox.x1) for bbox in bboxes) / fig_bbox.width
+    y1 = max(float(bbox.y1) for bbox in bboxes) / fig_bbox.height
+    return x0, y0, x1, y1
+
+
+def _set_nonoverlapping_supylabel(
+    fig: plt.Figure,
+    axes: Sequence[plt.Axes],
+    text: str,
+    *,
+    fallback_margin: float,
+    fontsize: float = 10,
+    padding_px: float = 10.0,
+):
+    left_margin, ylabel_x = _measured_dotplot_left_layout(fig, axes, fallback=fallback_margin)
+    artist = fig.supylabel(text, x=ylabel_x, fontsize=fontsize)
+    try:
+        for _ in range(2):
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            label_bbox = artist.get_window_extent(renderer=renderer)
+            left_boundary = _axes_text_boundary(fig, axes, side="left")
+            if left_boundary is None or label_bbox.x1 < left_boundary - padding_px:
+                break
+            fig_width_px = fig.get_figwidth() * fig.dpi
+            delta_frac = (label_bbox.x1 - (left_boundary - padding_px)) / max(fig_width_px, 1e-6)
+            artist.set_x(max(0.002, float(artist.get_position()[0]) - delta_frac))
+    except Exception:
+        pass
+    return artist, left_margin
+
+
+def _contrasting_text_color(color) -> str:
+    r, g, b = mcolors.to_rgb(color)
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return "#1F1F1F" if luminance > 0.62 else "#FFFFFF"
+
+
+def _text_width_in_data_units(
+    fig: plt.Figure,
+    ax: plt.Axes,
+    text: str,
+    *,
+    fontsize: float,
+) -> float | None:
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    except Exception:
+        return None
+
+    probe = ax.text(0.0, 0.0, text, fontsize=fontsize, alpha=0.0)
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        bbox = probe.get_window_extent(renderer=renderer)
+    finally:
+        probe.remove()
+
+    left_data = ax.transData.inverted().transform((bbox.x0, bbox.y0))[0]
+    right_data = ax.transData.inverted().transform((bbox.x1, bbox.y0))[0]
+    width = abs(float(right_data - left_data))
+    if not np.isfinite(width):
+        return None
+    return width
+
+
+def _draw_liana_source_target_dot(
+    long_df: pd.DataFrame,
+    *,
+    color_by: Literal["score", "pvalue"],
+    top_n: int | None,
+    interaction_use=None,
+    pair_lr_use=None,
+    ncols: int | None,
+    nrows: int | None,
+    cmap: str,
+    figsize: tuple[float, float] | None,
+    title: str | None,
+):
+    data = _rank_and_filter_long_df(
+        long_df,
+        color_by=color_by,
+        top_n=top_n,
+        interaction_use=interaction_use,
+        pair_lr_use=pair_lr_use,
+    )
+    data = data.loc[data["score"] > 0].copy()
+    if data.empty:
+        raise ValueError("No dotplot records remain after filtering.")
+
+    score_col = "score" if color_by == "score" else "neglog10_pvalue"
+    data["target"] = data["receiver"].astype(str)
+    data["source"] = data["sender"].astype(str)
+    data["interaction_label"] = data["interaction_display"].astype(str)
+    interactions = (
+        data.groupby("interaction_label", observed=True)[score_col]
+        .sum()
+        .sort_values(ascending=True)
+        .index.astype(str)
+        .tolist()
+    )
+    targets = (
+        data.groupby("target", observed=True)[score_col]
+        .sum()
+        .sort_values(ascending=False)
+        .index.astype(str)
+        .tolist()
+    )
+    sources = (
+        data.groupby("source", observed=True)[score_col]
+        .sum()
+        .sort_values(ascending=False)
+        .index.astype(str)
+        .tolist()
+    )
+    n_sources = len(sources)
+    if ncols is not None and ncols <= 0:
+        raise ValueError("`ncols` must be a positive integer when provided.")
+    if nrows is not None and nrows <= 0:
+        raise ValueError("`nrows` must be a positive integer when provided.")
+    if ncols is not None and nrows is not None and ncols * nrows < n_sources:
+        raise ValueError("`ncols * nrows` must be at least the number of source panels.")
+
+    if ncols is None and nrows is None:
+        ncols = n_sources
+        nrows = 1
+    elif ncols is None:
+        nrows = int(nrows)
+        ncols = int(np.ceil(n_sources / nrows))
+    elif nrows is None:
+        ncols = int(ncols)
+        nrows = int(np.ceil(n_sources / ncols))
+    else:
+        ncols = int(ncols)
+        nrows = int(nrows)
+
+    ncols = min(ncols, max(n_sources, 1))
+    nrows = int(np.ceil(n_sources / max(ncols, 1)))
+
+    if figsize is None:
+        panel_width = 0.5 * max(len(targets), 1) + 1.0
+        panel_height = 0.44 * max(len(interactions), 1) + 0.9
+        fig_width = panel_width * ncols + 0.8
+        fig_height = panel_height * nrows + 0.6
+    else:
+        fig_width = float(figsize[0])
+        fig_height = float(figsize[1])
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(fig_width, fig_height),
+        sharey=True,
+        squeeze=False,
+    )
+    axes_flat = axes.ravel()
+    facet_hspace = _facet_row_spacing(nrows=nrows)
+    left_margin = _dotplot_left_margin(interactions)
+    norm = mcolors.Normalize(vmin=float(data[score_col].min()), vmax=float(data[score_col].max()))
+    cmap_obj = plt.get_cmap(cmap)
+    last_visible_rows = _last_visible_row_per_column(len(sources), ncols)
+
+    for idx, (ax, source) in enumerate(zip(axes_flat, sources)):
+        subset = data.loc[data["source"] == source].copy()
+        x_codes = pd.Categorical(subset["target"].astype(str), categories=targets, ordered=True).codes
+        y_codes = pd.Categorical(subset["interaction_label"].astype(str), categories=interactions, ordered=True).codes
+        sizes = _normalized_marker_sizes(subset["score"])
+        colors = cmap_obj(norm(subset[score_col].astype(float)))
+        ax.scatter(x_codes, y_codes, s=sizes, c=colors, edgecolors="#2B2B2B", linewidths=0.35, alpha=0.88)
+        ax.set_title(str(source), fontsize=11, pad=8)
+        row_idx = idx // max(ncols, 1)
+        col_idx = idx % max(ncols, 1)
+        if row_idx == last_visible_rows.get(col_idx, nrows - 1):
+            ax.set_xticks(range(len(targets)), labels=targets, rotation=90)
+            ax.set_xlabel("Target", fontsize=10)
+        else:
+            ax.set_xticks(range(len(targets)), labels=[])
+            ax.set_xlabel("")
+        ax.set_yticks(range(len(interactions)), labels=interactions)
+        ax.tick_params(axis="x", labelsize=9)
+        ax.tick_params(axis="y", labelsize=9)
+        ax.grid(True, axis="both", color="#E6E6E6", linewidth=0.6)
+        ax.set_xlim(-0.5, len(targets) - 0.5)
+        ax.set_ylim(-0.5, len(interactions) - 0.5)
+    for idx, ax in enumerate(axes_flat[: len(sources)]):
+        if idx % max(ncols, 1) != 0:
+            ax.tick_params(labelleft=False)
+    for ax in axes_flat[len(sources):]:
+        ax.axis("off")
+    if hasattr(fig, "supylabel"):
+        _, left_margin = _set_nonoverlapping_supylabel(
+            fig,
+            axes_flat[: len(sources)],
+            "Interactions (Ligand -> Receptor)",
+            fallback_margin=left_margin,
+            fontsize=10,
+        )
+    else:
+        axes_flat[0].set_ylabel("Interactions (Ligand -> Receptor)", fontsize=10)
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
+    sm.set_array([])
+    fig.subplots_adjust(
+        left=left_margin,
+        right=0.84,
+        bottom=0.14 if nrows == 1 else 0.1,
+        top=0.92 if title else 0.96,
+        wspace=0.12,
+        hspace=facet_hspace,
+    )
+    cbar_height = 0.34 if nrows == 1 else 0.42
+    cbar_y = 0.31 if nrows == 1 else 0.28
+    cax = fig.add_axes([0.87, cbar_y, 0.012, cbar_height])
+    cbar = fig.colorbar(
+        sm,
+        cax=cax,
+        label="Communication score" if color_by == "score" else "-log10(p-value)",
+    )
+    cbar.ax.tick_params(labelsize=8, length=2)
+    cbar.set_label(
+        "Communication score" if color_by == "score" else "-log10(p-value)",
+        fontsize=9,
+    )
+    if title:
+        fig.suptitle(title, y=0.975, fontsize=13)
+    return fig, axes_flat[0]
+
+
+def _draw_liana_tileplot(
+    long_df: pd.DataFrame,
+    *,
+    color_by: Literal["score", "pvalue"],
+    top_n: int | None,
+    interaction_use=None,
+    pair_lr_use=None,
+    cmap: str,
+    figsize: tuple[float, float] | None,
+    title: str | None,
+):
+    data = _rank_and_filter_long_df(
+        long_df,
+        color_by=color_by,
+        top_n=top_n,
+        interaction_use=interaction_use,
+        pair_lr_use=pair_lr_use,
+    )
+    if data.empty:
+        raise ValueError("No tile plot records remain after filtering.")
+
+    score_col = "score" if color_by == "score" else "neglog10_pvalue"
+
+    def _row_side_labels(frame: pd.DataFrame, column: str, ordered_interactions: list[str]) -> list[str]:
+        labels = (
+            frame.groupby("interaction_display", observed=True)[column]
+            .agg(lambda values: ", ".join(sorted(set(map(str, values))))[:42])
+            .reindex(ordered_interactions)
+            .fillna("")
+        )
+        return labels.astype(str).tolist()
+
+    rows = []
+    for side, cell_col, gene_col in (
+        ("Source ligand", "sender", "ligand_display"),
+        ("Target receptor", "receiver", "receptor_display"),
+    ):
+        tmp = (
+            data.groupby(["interaction_display", cell_col], observed=True)
+            .agg(value=(score_col, "mean"), label=(gene_col, lambda values: ", ".join(sorted(set(map(str, values))))[:42]))
+            .reset_index()
+            .rename(columns={"interaction_display": "interaction", cell_col: "cell_type"})
+        )
+        tmp["type"] = side
+        rows.append(tmp)
+    plot_data = pd.concat(rows, ignore_index=True)
+    interactions = (
+        data.groupby("interaction_display", observed=True)[score_col]
+        .sum()
+        .sort_values(ascending=True)
+        .index.astype(str)
+        .tolist()
+    )
+    left_row_labels = _row_side_labels(data, "ligand_display", interactions)
+    right_row_labels = _row_side_labels(data, "receptor_display", interactions)
+    cell_types = (
+        pd.concat([plot_data.loc[:, "cell_type"]])
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+    sides = ["Source ligand", "Target receptor"]
+    if figsize is None:
+        fig_width = 0.52 * max(len(cell_types), 1) * len(sides) + 2.8
+        fig_height = 0.42 * max(len(interactions), 1) + 1.8
+    else:
+        fig_width = float(figsize[0])
+        fig_height = float(figsize[1])
+    fig, axes = plt.subplots(1, 2, figsize=(fig_width, fig_height), sharey=False, squeeze=False)
+    axes_flat = axes.ravel()
+    norm = mcolors.Normalize(vmin=float(plot_data["value"].min()), vmax=float(plot_data["value"].max()))
+    cmap_obj = plt.get_cmap(cmap)
+    left_label_len = max((len(label) for label in left_row_labels), default=0)
+    right_label_len = max((len(label) for label in right_row_labels), default=0)
+    left_margin = float(np.clip(0.16 + 0.004 * left_label_len, 0.18, 0.3))
+    right_text_space = float(np.clip(0.12 + 0.004 * right_label_len, 0.16, 0.24))
+    cbar_space = 0.08
+
+    for ax, side in zip(axes_flat, sides):
+        subset = plot_data.loc[plot_data["type"] == side].copy()
+        matrix = subset.pivot_table(index="interaction", columns="cell_type", values="value", aggfunc="mean")
+        matrix = matrix.reindex(index=interactions, columns=cell_types)
+        im = ax.imshow(matrix.to_numpy(dtype=float), aspect="auto", cmap=cmap_obj, norm=norm)
+        ax.set_title("", fontsize=11)
+        ax.set_xticks(range(len(cell_types)), labels=cell_types, rotation=90)
+        ax.set_yticks(range(len(interactions)), labels=interactions)
+        ax.set_xlabel("Cell type", fontsize=10)
+        ax.tick_params(axis="x", labelsize=9)
+        ax.tick_params(axis="y", labelsize=9)
+        ax.grid(False)
+        ax.set_xticks(np.arange(-0.5, len(cell_types), 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, len(interactions), 1), minor=True)
+        ax.grid(which="minor", color="#E6E6E6", linewidth=0.6)
+        ax.tick_params(which="minor", bottom=False, left=False)
+
+    axes_flat[0].set_yticks(range(len(interactions)), labels=left_row_labels)
+    axes_flat[0].set_ylabel("Source ligand", fontsize=10)
+    axes_flat[0].tick_params(axis="y", labelsize=9, pad=4)
+    axes_flat[1].set_yticks(range(len(interactions)), labels=right_row_labels)
+    axes_flat[1].yaxis.tick_right()
+    axes_flat[1].tick_params(axis="y", labelright=True, labelleft=False, labelsize=9, pad=4)
+    axes_flat[1].yaxis.set_label_position("right")
+    axes_flat[1].set_ylabel("Target receptor", fontsize=10, rotation=270, labelpad=18)
+
+    plot_right = 1.0 - right_text_space - cbar_space
+    fig.subplots_adjust(
+        left=left_margin,
+        right=plot_right,
+        bottom=0.24,
+        top=0.92 if title else 0.97,
+        wspace=0.08,
+    )
+    right_text_px = _measured_axis_text_extent(fig, axes_flat[1], side="right")
+    if right_text_px is not None:
+        fig_width_px = fig.get_figwidth() * fig.dpi
+        right_text_frac = right_text_px / max(fig_width_px, 1e-6)
+        cbar_x = min(max(right_text_frac + 0.02, plot_right + 0.03), 0.96)
+    else:
+        cbar_x = plot_right + 0.04
+    heatmap_bbox = axes_flat[1].get_position()
+    cbar_height = 0.5 * heatmap_bbox.height
+    cbar_y = heatmap_bbox.y0 + 0.5 * heatmap_bbox.height - 0.5 * cbar_height
+    cax = fig.add_axes([cbar_x, cbar_y, 0.012, cbar_height])
+    cbar = fig.colorbar(
+        im,
+        cax=cax,
+        label="Communication score" if color_by == "score" else "-log10(p-value)",
+    )
+    cbar.ax.tick_params(labelsize=8, length=2)
+    cbar.set_label(
+        "Communication score" if color_by == "score" else "-log10(p-value)",
+        fontsize=9,
+    )
+    if title:
+        fig.suptitle(title, y=0.98, fontsize=13)
+    return fig, axes_flat[0]
+
+
+def _draw_liana_sample_dot(
+    long_df: pd.DataFrame,
+    *,
+    sample_key: str,
+    color_by: Literal["score", "pvalue"],
+    top_n: int | None,
+    top_n_pairs: int | None,
+    interaction_use=None,
+    pair_lr_use=None,
+    ncols: int | None,
+    nrows: int | None,
+    cmap: str,
+    figsize: tuple[float, float] | None,
+    title: str | None,
+):
+    if sample_key not in long_df.columns:
+        raise ValueError(
+            f"`sample_key='{sample_key}'` is not available. Provide LIANA results with a "
+            f"`{sample_key}` column before using `plot_type='sample_dot'`."
+        )
+    data = _rank_and_filter_long_df(
+        long_df,
+        color_by=color_by,
+        top_n=top_n,
+        interaction_use=interaction_use,
+        pair_lr_use=pair_lr_use,
+    )
+    data = data.loc[data["score"] > 0].copy()
+    if data.empty:
+        raise ValueError("No sample dotplot records remain after filtering.")
+
+    score_col = "score" if color_by == "score" else "neglog10_pvalue"
+    data["sample"] = data[sample_key].astype(str)
+    data["pair"] = data["sender"].astype(str) + " -> " + data["receiver"].astype(str)
+    interactions = (
+        data.groupby("interaction_display", observed=True)[score_col]
+        .sum()
+        .sort_values(ascending=False)
+        .index.astype(str)
+        .tolist()
+    )
+    samples = sorted(data["sample"].dropna().astype(str).unique().tolist())
+    n_panels = max(len(interactions), 1)
+    if ncols is not None and ncols <= 0:
+        raise ValueError("`ncols` must be a positive integer when provided.")
+    if nrows is not None and nrows <= 0:
+        raise ValueError("`nrows` must be a positive integer when provided.")
+    if ncols is not None and nrows is not None and ncols * nrows < n_panels:
+        raise ValueError("`ncols * nrows` must be at least the number of interaction panels.")
+
+    if ncols is None and nrows is None:
+        ncols = min(3, n_panels)
+        nrows = int(np.ceil(n_panels / ncols))
+    elif ncols is None:
+        nrows = int(nrows)
+        ncols = int(np.ceil(n_panels / nrows))
+    elif nrows is None:
+        ncols = int(ncols)
+        nrows = int(np.ceil(n_panels / ncols))
+    else:
+        ncols = int(ncols)
+        nrows = int(nrows)
+
+    ncols = min(ncols, max(n_panels, 1))
+    nrows = int(np.ceil(n_panels / max(ncols, 1)))
+
+    if figsize is None:
+        fig_width = 3.1 * ncols + 1.4
+        fig_height = 2.7 * nrows + 0.9
+    else:
+        fig_width = float(figsize[0])
+        fig_height = float(figsize[1])
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height), squeeze=False, sharex=False, sharey=False)
+    axes_flat = axes.ravel()
+    norm = mcolors.Normalize(vmin=float(data[score_col].min()), vmax=float(data[score_col].max()))
+    cmap_obj = plt.get_cmap(cmap)
+    panel_height = fig_height / max(nrows, 1)
+    auto_pair_cap = max(4, int((panel_height - 0.9) / 0.32))
+    pair_cap = int(top_n_pairs) if top_n_pairs is not None and top_n_pairs > 0 else auto_pair_cap
+    last_visible_rows = _last_visible_row_per_column(len(interactions), ncols)
+
+    visible_axes = []
+    for idx, (ax, interaction) in enumerate(zip(axes_flat, interactions)):
+        subset = data.loc[data["interaction_display"].astype(str) == interaction].copy()
+        pairs = (
+            subset.groupby("pair", observed=True)[score_col]
+            .sum()
+            .sort_values(ascending=False)
+            .index.astype(str)
+            .tolist()
+        )
+        pairs = pairs[:pair_cap]
+        subset = subset.loc[subset["pair"].astype(str).isin(pairs)].copy()
+        pairs = [pair for pair in pairs if pair in set(subset["pair"].astype(str))]
+        x_codes = pd.Categorical(subset["sample"].astype(str), categories=samples, ordered=True).codes
+        y_codes = pd.Categorical(subset["pair"].astype(str), categories=pairs, ordered=True).codes
+        ax.scatter(
+            x_codes,
+            y_codes,
+            s=_normalized_marker_sizes(subset["score"]),
+            c=cmap_obj(norm(subset[score_col].astype(float))),
+            edgecolors="#2B2B2B",
+            linewidths=0.35,
+            alpha=0.88,
+            zorder=3,
+        )
+        ax.set_title(interaction, fontsize=10)
+        row_idx = idx // max(ncols, 1)
+        col_idx = idx % max(ncols, 1)
+        if row_idx == last_visible_rows.get(col_idx, nrows - 1):
+            ax.set_xticks(range(len(samples)), labels=samples, rotation=90)
+            ax.set_xlabel(str(sample_key), fontsize=10)
+        else:
+            ax.set_xticks(range(len(samples)), labels=[])
+            ax.set_xlabel("")
+        if col_idx == 0:
+            ax.set_yticks(range(len(pairs)), labels=pairs)
+        else:
+            ax.set_yticks(range(len(pairs)), labels=[])
+        ax.tick_params(axis="x", labelsize=9)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.grid(True, axis="both", color="#E6E6E6", linewidth=0.6, zorder=0)
+        ax.set_xlim(-0.18, len(samples) - 1 + 0.18)
+        ax.set_ylim(len(pairs) - 1 + 0.32, -0.32)
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.9)
+            spine.set_zorder(1)
+        visible_axes.append(ax)
+    for ax in axes_flat[len(interactions):]:
+        ax.axis("off")
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
+    sm.set_array([])
+    fig.subplots_adjust(left=0.28, right=0.88, bottom=0.16, top=0.9 if title else 0.95, wspace=0.18, hspace=0.24)
+    left_axes = [ax for idx, ax in enumerate(visible_axes) if idx % max(ncols, 1) == 0]
+    max_pair_label_len = max((len(str(pair)) for pair in data["pair"].astype(str).unique()), default=0)
+    fallback_left_margin = float(np.clip(0.22 + 0.0048 * max_pair_label_len, 0.34, 0.56))
+    left_margin = _measured_dotplot_left_layout(fig, left_axes, fallback=fallback_left_margin)[0]
+    fig.subplots_adjust(left=left_margin, right=0.88, bottom=0.16, top=0.9 if title else 0.95, wspace=0.18, hspace=0.24)
+    if hasattr(fig, "supylabel"):
+        _set_nonoverlapping_supylabel(
+            fig,
+            left_axes,
+            "Sender -> receiver",
+            fallback_margin=left_margin,
+            fontsize=10,
+            padding_px=24,
+        )
+    else:
+        visible_axes[0].set_ylabel("Sender -> receiver", fontsize=10)
+
+    x0 = min(ax.get_position().x0 for ax in visible_axes)
+    y0 = min(ax.get_position().y0 for ax in visible_axes)
+    x1 = max(ax.get_position().x1 for ax in visible_axes)
+    y1 = max(ax.get_position().y1 for ax in visible_axes)
+    tightbbox = _axes_union_tightbbox(fig, visible_axes)
+    if tightbbox is not None:
+        _, _, tight_x1, _ = tightbbox
+        x1 = max(x1, tight_x1)
+    bbox_height = y1 - y0
+    cbar_height = 0.45 * bbox_height
+    cbar_y = y0 + 0.5 * bbox_height - 0.5 * cbar_height
+    cax = fig.add_axes([min(x1 + 0.03, 0.94), cbar_y, 0.012, cbar_height])
+    cbar = fig.colorbar(
+        sm,
+        cax=cax,
+        label="Communication score" if color_by == "score" else "-log10(p-value)",
+    )
+    cbar.ax.tick_params(labelsize=8, length=2)
+    cbar.set_label(
+        "Communication score" if color_by == "score" else "-log10(p-value)",
+        fontsize=9,
+    )
+    if title:
+        fig.suptitle(title, y=0.98, fontsize=13)
+    return fig, axes_flat[0]
+
+
 def _maybe_save_show(fig, *, show: bool, save):
     if save:
         save_path = save if isinstance(save, str) else "communication_plot.png"
@@ -1492,6 +2290,127 @@ def _style_scatter_axis(ax, *, max_marker_size: float | None = None, arrow: bool
     ax.margins(x=0.08, y=0.10)
 
 
+def _style_lr_contribution_bar_axis(ax) -> None:
+    title_fontsize = 13
+    tick_fontsize = 13
+    label_fontsize = title_fontsize - 1
+    bars = list(ax.patches)
+    texts = list(ax.texts)
+    max_width = max((float(bar.get_width()) for bar in bars), default=0.0)
+    label_padding = 0.015 * max(max_width, 1.0)
+    outside_padding = 0.012 * max(max_width, 1.0)
+    has_outside_labels = False
+    for bar, text in zip(bars, texts):
+        label = text.get_text()
+        label_width = _text_width_in_data_units(
+            ax.figure,
+            ax,
+            label,
+            fontsize=label_fontsize,
+        )
+        bar_width = float(bar.get_width())
+        fits_inside = (
+            label_width is not None
+            and bar_width >= label_width + 2.0 * label_padding
+        )
+        if fits_inside:
+            text_x = max(bar_width - label_padding, label_width + label_padding)
+            text_ha = "right"
+            text_color = _contrasting_text_color(bar.get_facecolor())
+        else:
+            text_x = bar_width + outside_padding
+            text_ha = "left"
+            text_color = "#4A4A4A"
+            has_outside_labels = True
+        text.set_x(text_x)
+        text.set_y(float(bar.get_y() + bar.get_height() / 2.0))
+        text.set_ha(text_ha)
+        text.set_va("center")
+        text.set_color(text_color)
+        text.set_fontsize(label_fontsize)
+
+    if max_width > 0:
+        outside_extent = max(
+            [
+                float(bar.get_width())
+                + outside_padding
+                + (
+                    _text_width_in_data_units(
+                        ax.figure,
+                        ax,
+                        text.get_text(),
+                        fontsize=label_fontsize,
+                    )
+                    or 0.0
+                )
+            for bar, text in zip(bars, texts)
+            ],
+            default=max_width,
+        )
+        ax.set_xlim(0, outside_extent + label_padding if has_outside_labels else max_width * 1.001)
+    ax.margins(x=0.0)
+
+    ax.tick_params(axis="x", labelsize=12)
+    ax.tick_params(axis="y", labelsize=tick_fontsize)
+    ax.set_title(ax.get_title(), fontsize=title_fontsize)
+    ax.set_xlabel(ax.get_xlabel(), fontsize=12)
+    ax.set_ylabel("")
+    ax.grid(axis="x", alpha=0.22, linewidth=0.7)
+
+
+def _style_lr_contribution_scatter_axis(ax) -> None:
+    ax.set_title(ax.get_title(), fontsize=13)
+    ax.set_xlabel(ax.get_xlabel(), fontsize=12)
+    ax.set_ylabel(ax.get_ylabel(), fontsize=12)
+    ax.tick_params(axis="both", labelsize=11)
+    if ax.collections:
+        for collection in ax.collections:
+            if not hasattr(collection, "get_sizes"):
+                continue
+            sizes = np.asarray(collection.get_sizes(), dtype=float)
+            if sizes.size == 0:
+                continue
+            if float(sizes.max()) > 260.0:
+                scaled = np.sqrt(np.clip(sizes, a_min=0.0, a_max=None))
+                if float(scaled.max()) > 0.0:
+                    scaled = 36.0 + (scaled / float(scaled.max())) * (260.0 - 36.0)
+                collection.set_sizes(np.clip(scaled, 24.0, 260.0))
+    ax.margins(x=0.16, y=0.18)
+    ax.grid(True, alpha=0.22, linewidth=0.7)
+    for collection in ax.collections:
+        if hasattr(collection, "set_alpha"):
+            collection.set_alpha(0.82)
+    for text in ax.texts:
+        text.set_clip_on(False)
+    _repel_text_labels(ax, ax.texts, arrow=True)
+    if ax.figure is not None:
+        for extra_ax in ax.figure.axes:
+            if extra_ax is ax:
+                continue
+            ylabel = extra_ax.get_ylabel()
+            if ylabel and "Contribution" in ylabel:
+                bbox = ax.get_position()
+                extra_ax.set_position([
+                    bbox.x1 + 0.018,
+                    bbox.y0 + 0.25 * bbox.height,
+                    0.014,
+                    0.5 * bbox.height,
+                ])
+                extra_ax.tick_params(labelsize=11)
+                extra_ax.yaxis.label.set_size(12)
+
+
+def _resolve_dual_cmaps(cmap) -> tuple[str, str]:
+    if isinstance(cmap, (tuple, list)):
+        if len(cmap) >= 2:
+            return str(cmap[0]), str(cmap[1])
+        if len(cmap) == 1:
+            return str(cmap[0]), str(cmap[0])
+    if cmap is None:
+        return "Blues", "viridis"
+    return str(cmap), str(cmap)
+
+
 def _draw_role_scatter_style(
     ax,
     *,
@@ -1618,6 +2537,7 @@ def _dot_matrix_plot(
     right_annos: Sequence[str] = (),
 ):
     ma, mp = _import_marsilea()
+    _warn_if_broken_marsilea_version(ma)
     display_color = matrix.copy()
     display_size = size_matrix.reindex(index=matrix.index, columns=matrix.columns, fill_value=0.0).copy()
     row_names = matrix.index.astype(str).tolist()
@@ -1783,12 +2703,12 @@ def _draw_diff_circle_network(
 @register_function(
     aliases=["ccc_heatmap", "communication_heatmap", "细胞通讯热图"],
     category="pl",
-    description="Python-native cell-cell communication heatmap and dot-matrix plots for CellPhoneDB-style communication AnnData.",
+    description="Python-native cell-cell communication heatmaps and dot-style plots that accept raw analysis AnnData or preformatted communication AnnData.",
     examples=[
-        "ov.pl.ccc_heatmap(comm_adata, plot_type='heatmap')",
-        "ov.pl.ccc_heatmap(comm_adata, plot_type='dot', display_by='interaction', top_n=20)",
-        "ov.pl.ccc_heatmap(comm_adata, plot_type='role_heatmap', pattern='incoming')",
-        "ov.pl.ccc_heatmap(comm_adata, signaling='MK', sender_use='Ductal')",
+        "ov.pl.ccc_heatmap(adata, plot_type='heatmap')",
+        "ov.pl.ccc_heatmap(adata, plot_type='dot', display_by='interaction', top_n=20)",
+        "ov.pl.ccc_heatmap(adata, plot_type='role_heatmap', pattern='incoming')",
+        "ov.pl.ccc_heatmap(adata, signaling='MK', sender_use='Ductal')",
     ],
     related=["pl.ccc_network_plot", "pl.ccc_stat_plot", "pl.CellChatViz"],
 )
@@ -1799,6 +2719,10 @@ def ccc_heatmap(
         "heatmap",
         "focused_heatmap",
         "dot",
+        "tile",
+        "source_target_dot",
+        "source_target_tile",
+        "sample_dot",
         "bubble",
         "bubble_lr",
         "pathway_bubble",
@@ -1814,6 +2738,17 @@ def ccc_heatmap(
     signaling=None,
     interaction_use=None,
     pair_lr_use=None,
+    sample_key: str = "sample",
+    ncols: int | None = None,
+    nrows: int | None = None,
+    result_uns_key: str = "liana_res",
+    score_key: str = "specificity_rank",
+    pvalue_key: str = "specificity_rank",
+    inverse_score: bool = True,
+    inverse_pvalue: bool = False,
+    classification: str | Mapping[str, str] | None = None,
+    classification_reference: str | pd.DataFrame | None = "cellchat",
+    classification_fallback: str | None = "family",
     pvalue_threshold: float = 0.05,
     pattern: Literal["outgoing", "incoming", "all"] = "all",
     color_by: Literal["score", "pvalue"] = "score",
@@ -1836,11 +2771,14 @@ def ccc_heatmap(
     min_interaction_threshold: float = 0.0,
     cluster_rows: bool = False,
     cluster_columns: bool = False,
+    show_row_names: bool = False,
+    show_col_names: bool = False,
     add_text: bool | None = None,
     border: bool = False,
     cmap: str = "Reds",
-    figsize: tuple[float, float] = (8, 6),
+    figsize: tuple[float, float] | None = None,
     title: str | None = None,
+    verbose: bool = True,
     show: bool = False,
     save: str | bool = False,
 ):
@@ -1849,13 +2787,17 @@ def ccc_heatmap(
     Parameters
     ----------
     adata : anndata.AnnData
-        Communication AnnData produced by the OmicVerse CCC workflow. The
-        object should contain aggregated pathway scores and interaction-level
-        summaries required by the selected ``plot_type``.
+        Communication AnnData produced by the OmicVerse CCC workflow, or a
+        regular AnnData containing a LIANA result table in
+        ``adata.uns[result_uns_key]``. LIANA inputs are adapted internally to
+        the communication format expected by ``ccc_*``.
     plot_type : str, default="heatmap"
-        Matrix view to render. Supported values include aggregated heatmaps,
-        focused heatmaps, dot and bubble summaries, pathway-level bubble
-        plots, signaling role maps, and differential heatmaps.
+        Matrix view to render. ``'dot'`` is the primary LIANA-style source /
+        target interaction dotplot. ``'source_target_dot'`` is kept only as a
+        backward-compatible alias of the same layout. Other supported values
+        include aggregated heatmaps, focused heatmaps, bubble summaries,
+        pathway-level bubble plots, source-target tile/sample views,
+        signaling role maps, and differential heatmaps.
     comparison_adata : anndata.AnnData or None, default=None
         Second communication AnnData used when plotting condition-to-condition
         differential heatmaps.
@@ -1873,6 +2815,41 @@ def ccc_heatmap(
         plots.
     pair_lr_use : str, sequence of str, or None, default=None
         Ligand-receptor pair identifiers used by pair-resolved bubble views.
+    sample_key : str, default="sample"
+        Observation/sample column used by ``plot_type='sample_dot'`` after
+        LIANA results are converted to communication AnnData. If this column
+        is not present but LIANA conversion stored a detected sample/context
+        key in ``adata.uns['liana_sample_key']``, that key is used
+        automatically.
+    ncols, nrows : int or None, default=None
+        Number of source facets per row/column for LIANA-style dot layouts.
+        These parameters are used by ``plot_type='dot'`` (and the
+        backward-compatible alias ``'source_target_dot'``) to avoid a
+        single excessively wide row when many source panels are shown.
+    result_uns_key : str, default="liana_res"
+        ``adata.uns`` key searched when ``adata`` is not already a
+        communication AnnData. If a compatible LIANA result table is found, it
+        is converted automatically.
+    score_key, pvalue_key : str, default="specificity_rank"
+        Columns used when auto-converting LIANA results to communication
+        scores and p-value-like support values.
+    inverse_score, inverse_pvalue : bool, default=(True, False)
+        Whether the LIANA score or p-value columns should be inverted during
+        automatic conversion.
+    classification : str, mapping, or None, default=None
+        Optional LIANA classification override used only during automatic
+        conversion.
+    classification_reference : str, pandas.DataFrame, or None, default="cellchat"
+        Reference used to backfill pathway labels during automatic LIANA
+        conversion. This mainly affects pathway/signaling summaries such as
+        ``display_by='aggregation'`` and ``plot_type='pathway_summary'``.
+        Pure interaction-level views do not depend on this label unless the
+        plotted layout groups interactions by pathway.
+    classification_fallback : str or None, default="family"
+        Fallback pathway label strategy used during automatic LIANA
+        conversion when a pair is not found in ``classification_reference``.
+        Supported values are ``'family'``, ``'unclassified'``,
+        ``'label:<name>'``, or ``None``.
     pvalue_threshold : float, default=0.05
         Maximum p-value retained as a significant communication event.
     pattern : {"outgoing", "incoming", "all"}, default="all"
@@ -1884,11 +2861,10 @@ def ccc_heatmap(
         Aggregation statistic used to summarize communication strengths before
         plotting.
     top_n : int, default=20
-        Number of top pathways or interactions retained in ranked matrix
-        views.
+        Number of top pathways or interactions retained in ranked views.
     top_n_pairs : int or None, default=None
-        Number of ligand-receptor pairs retained in interaction-level views.
-        When omitted and ``display_by='interaction'``, ``top_n`` is used.
+        Reserved for dense interaction matrix layouts. It is not used by the
+        LIANA-style ``plot_type='dot'`` view.
     top_anno : str, sequence of str, or None, default="bar"
         Annotation layer(s) displayed above the matrix, such as cell-color or
         summary-bar annotations.
@@ -1901,8 +2877,8 @@ def ccc_heatmap(
     bar_value : {"count", "sum", "mean", "max"}, default="sum"
         Summary statistic used in bar-style annotations.
     facet_by : {"sender", "receiver"} or None, default=None
-        Split the matrix into sender- or receiver-specific facets when the
-        selected plot type supports faceting.
+        Split matrix-style views into sender- or receiver-specific facets when
+        the selected plot type supports faceting.
     pathway_method : str, default="mean"
         Method used to summarize multiple ligand-receptor pairs into pathway
         level scores.
@@ -1926,6 +2902,13 @@ def ccc_heatmap(
         Whether to cluster matrix rows before plotting.
     cluster_columns : bool, default=False
         Whether to cluster matrix columns before plotting.
+    show_row_names : bool, default=False
+        Whether to display explicit row/cell-type labels in Marsilea-backed
+        ``plot_type='heatmap'`` and ``plot_type='focused_heatmap'`` views.
+    show_col_names : bool, default=False
+        Whether to display explicit column/cell-type labels in
+        Marsilea-backed ``plot_type='heatmap'`` and
+        ``plot_type='focused_heatmap'`` views.
     add_text : bool or None, default=None
         Whether to overlay text labels on matrix entries when the selected
         plot type supports annotation text.
@@ -1933,11 +2916,21 @@ def ccc_heatmap(
         Whether to draw borders around matrix cells.
     cmap : str, default="Reds"
         Colormap used for the matrix color scale.
-    figsize : tuple of float, default=(8, 6)
-        Figure size in inches.
+    figsize : tuple of float or None, default=None
+        Figure size in inches. For ``plot_type='dot'`` and
+        ``'source_target_dot'`` and ``'tile'``/``'source_target_tile'``,
+        ``None`` enables automatic sizing based on
+        the number of source panels, targets, and interactions. When an
+        explicit tuple is provided, the dot plot uses that final size directly
+        without enforcing an internal minimum. Other heatmap-style views fall
+        back to their historical default size when ``None`` is given.
     title : str or None, default=None
         Custom title for the generated figure. When omitted, a plot-specific
         default title is used.
+    verbose : bool, default=True
+        Whether pathway-ranking helper steps should print textual summaries to
+        standard output. This currently matters for views that auto-rank
+        pathways from summary statistics.
     show : bool, default=False
         Whether to immediately display the figure.
     save : str or bool, default=False
@@ -1949,6 +2942,36 @@ def ccc_heatmap(
         A ``(fig, ax)`` tuple containing the Matplotlib figure and the main
         axes used for the rendered heatmap-style view.
     """
+    _validate_display_by(display_by, func_name="ccc_heatmap")
+    dot_figsize = figsize
+    if figsize is None:
+        figsize = (8, 6)
+
+    adata = _resolve_comm_adata(
+        adata,
+        arg_name="adata",
+        result_uns_key=result_uns_key,
+        score_key=score_key,
+        pvalue_key=pvalue_key,
+        inverse_score=inverse_score,
+        inverse_pvalue=inverse_pvalue,
+        classification=classification,
+        classification_reference=classification_reference,
+        classification_fallback=classification_fallback,
+    )
+    if comparison_adata is not None:
+        comparison_adata = _resolve_comm_adata(
+            comparison_adata,
+            arg_name="comparison_adata",
+            result_uns_key=result_uns_key,
+            score_key=score_key,
+            pvalue_key=pvalue_key,
+            inverse_score=inverse_score,
+            inverse_pvalue=inverse_pvalue,
+            classification=classification,
+            classification_reference=classification_reference,
+            classification_fallback=classification_fallback,
+        )
     default_top_bar = top_anno == "bar"
     default_left_bar = left_anno == "bar"
     default_bottom_cell = bottom_anno == "cell"
@@ -1957,16 +2980,19 @@ def ccc_heatmap(
     bottom_annos = _normalize_side_annotations(bottom_anno, default=("cell",))
     left_annos = _normalize_side_annotations(left_anno, default=("bar",))
     right_annos = _normalize_side_annotations(right_anno, default=("cell",))
-    if plot_type in {"heatmap", "dot", "bubble"} and default_top_bar:
+    if plot_type in {"heatmap", "bubble"} and default_top_bar:
         top_annos = ["bar", "cell"]
-    if plot_type in {"heatmap", "dot", "bubble"} and display_by == "aggregation" and default_left_bar:
+    if plot_type in {"heatmap", "bubble"} and display_by == "aggregation" and default_left_bar:
         left_annos = ["bar", "cell"]
-    if plot_type in {"heatmap", "dot", "bubble", "pathway_bubble"} and default_bottom_cell:
+    if plot_type in {"heatmap", "bubble", "pathway_bubble"} and default_bottom_cell:
         bottom_annos = []
-    if plot_type in {"heatmap", "dot", "bubble", "pathway_bubble"} and default_right_cell:
+    if plot_type in {"heatmap", "bubble", "pathway_bubble"} and default_right_cell:
         right_annos = []
-    if display_by == "interaction" and top_n_pairs is None:
-        top_n_pairs = top_n
+    if plot_type == "matrix_dot":
+        raise ValueError(
+            "`plot_type='matrix_dot'` has been removed. Use `plot_type='dot'` "
+            "for the LIANA-style interaction dotplot."
+        )
 
     if plot_type == "heatmap" and display_by == "aggregation":
         _raise_for_unsupported_arguments(
@@ -1993,6 +3019,8 @@ def ccc_heatmap(
             add_dendrogram=cluster_rows or cluster_columns,
             add_row_sum=True,
             add_col_sum=True,
+            show_row_names=show_row_names,
+            show_col_names=show_col_names,
             title=title or "Communication heatmap",
         )
         fig, ax = _render_plotter_figure(plotter, title=None)
@@ -2024,6 +3052,8 @@ def ccc_heatmap(
             add_dendrogram=cluster_rows or cluster_columns,
             add_row_sum=True,
             add_col_sum=True,
+            show_row_names=show_row_names,
+            show_col_names=show_col_names,
             figsize=figsize,
             title=title or "Focused communication heatmap",
         )
@@ -2050,7 +3080,8 @@ def ccc_heatmap(
         viz = _build_cellchatviz(adata)
         role_pattern = "overall" if pattern == "all" else pattern
         signaling_values = _normalize_use_arg(signaling)
-        if signaling_values is None and top_n is not None and top_n > 0:
+        auto_selected_pathways = signaling_values is None and top_n is not None and top_n > 0
+        if auto_selected_pathways:
             pathway_summary = _pathway_summary_table(
                 adata,
                 signaling=None,
@@ -2058,18 +3089,26 @@ def ccc_heatmap(
                 min_lr_pairs=min_lr_pairs,
                 min_expression=min_expression,
                 pvalue_threshold=pvalue_threshold,
+                verbose=verbose,
             )
             signaling_values = pathway_summary["pathway"].astype(str).head(int(top_n)).tolist()
-        plotter, _, _ = viz.netAnalysis_signalingRole_heatmap(
-            pattern=role_pattern,
-            signaling=signaling_values,
-            row_scale=False,
-            figsize=figsize,
-            cmap=cmap,
-            show_totals=True,
-            title=title or f"Communication role heatmap ({role_pattern})",
-        )
-        fig, ax = _render_plotter_figure(plotter, title=None)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Using categorical units to plot a list of strings that are all parsable as floats or dates.*",
+                category=UserWarning,
+            )
+            plotter, _, _ = viz.netAnalysis_signalingRole_heatmap(
+                pattern=role_pattern,
+                signaling=signaling_values,
+                row_scale=False,
+                figsize=figsize,
+                cmap=cmap,
+                show_totals=True,
+                min_threshold=min_expression,
+                title=title or f"Communication role heatmap ({role_pattern})",
+            )
+            fig, ax = _render_plotter_figure(plotter, title=None)
         return _maybe_save_show(fig, show=show, save=save), ax
 
     if plot_type == "role_network":
@@ -2152,32 +3191,58 @@ def ccc_heatmap(
             value=value,
             allowed_value=("sum", "mean", "count"),
         )
-        signaling_values = _require_use_argument(plot_type, "signaling", signaling)
+        signaling_values = _normalize_use_arg(signaling)
+        auto_selected_pathways = signaling_values is None and top_n is not None and top_n > 0
+        if auto_selected_pathways:
+            pathway_summary = _pathway_summary_table(
+                adata,
+                signaling=None,
+                pathway_method=pathway_method,
+                min_lr_pairs=min_lr_pairs,
+                min_expression=min_expression,
+                pvalue_threshold=pvalue_threshold,
+                verbose=verbose,
+            )
+            signaling_values = pathway_summary["pathway"].astype(str).head(int(top_n)).tolist()
+        if signaling_values is None:
+            raise ValueError("`signaling` is required when `plot_type='pathway_bubble'`, unless `top_n` is used to auto-select pathways.")
         viz = _build_cellchatviz(adata)
-        plotter = viz.netVisual_bubble_marsilea(
-            sources_use=sender_use,
-            targets_use=receiver_use,
-            signaling=signaling_values,
-            pvalue_threshold=pvalue_threshold,
-            mean_threshold=min_expression,
-            top_interactions=top_n,
-            show_pvalue=True,
-            show_mean=True,
-            show_count=(value == "count"),
-            add_violin=add_violin,
-            add_dendrogram=cluster_rows or cluster_columns,
-            group_pathways=group_pathways,
-            figsize=figsize,
-            title=title or "Pathway bubble summary",
-            remove_isolate=remove_isolate,
-            cmap=cmap,
-            transpose=transpose,
-            show_sender_colors=True,
-            show_receiver_colors=False,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Using categorical units to plot a list of strings that are all parsable as floats or dates.*",
+                category=UserWarning,
+            )
+            plotter = viz.netVisual_bubble_marsilea(
+                sources_use=sender_use,
+                targets_use=receiver_use,
+                signaling=signaling_values,
+                pvalue_threshold=pvalue_threshold,
+                mean_threshold=min_expression,
+                top_interactions=None if auto_selected_pathways else top_n,
+                show_pvalue=True,
+                show_mean=True,
+                show_count=(value == "count"),
+                add_violin=add_violin,
+                add_dendrogram=cluster_rows or cluster_columns,
+                group_pathways=group_pathways,
+                figsize=figsize,
+                title=title or "Pathway bubble summary",
+                remove_isolate=remove_isolate,
+                cmap=cmap,
+                transpose=transpose,
+                show_sender_colors=True,
+                show_receiver_colors=False,
+            )
         if plotter is None:
             raise ValueError("No communication records remain after filtering.")
-        fig, ax = _render_plotter_figure(plotter, title=None)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Using categorical units to plot a list of strings that are all parsable as floats or dates.*",
+                category=UserWarning,
+            )
+            fig, ax = _render_plotter_figure(plotter, title=None)
         return _maybe_save_show(fig, show=show, save=save), ax
 
     if plot_type == "bubble_lr":
@@ -2275,6 +3340,8 @@ def ccc_heatmap(
             right_annos=right_annos,
             max_col_labels=14,
             clip_quantile=0.95,
+            show_row_names=show_row_names,
+            show_col_names=show_col_names,
         )
         return _maybe_save_show(fig, show=show, save=save), ax
 
@@ -2287,6 +3354,91 @@ def ccc_heatmap(
         pair_lr_use=pair_lr_use,
         pvalue_threshold=pvalue_threshold,
     )
+    resolved_sample_key = sample_key
+    if resolved_sample_key not in adata.obs.columns:
+        detected_sample_key = adata.uns.get("liana_sample_key")
+        if (
+            isinstance(detected_sample_key, str)
+            and detected_sample_key
+            and detected_sample_key != "none"
+            and detected_sample_key in adata.obs.columns
+        ):
+            resolved_sample_key = detected_sample_key
+
+    if resolved_sample_key in adata.obs.columns:
+        long_df = long_df.merge(
+            adata.obs.loc[:, [resolved_sample_key]].astype(str),
+            left_on="pair_id",
+            right_index=True,
+            how="left",
+        )
+    if plot_type in {"dot", "source_target_dot"}:
+        if display_by != "interaction":
+            raise ValueError(
+                f"`plot_type='{plot_type}'` only supports `display_by='interaction'`."
+            )
+        if plot_type == "source_target_dot":
+            warnings.warn(
+                "`plot_type='source_target_dot'` is now a compatibility alias of "
+                "`plot_type='dot'`. Prefer `plot_type='dot'`.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        _raise_for_unsupported_arguments(
+            plot_type,
+            comparison_adata=comparison_adata,
+            facet_by=facet_by,
+            top_n_pairs=top_n_pairs,
+        )
+        fig, ax = _draw_liana_source_target_dot(
+            long_df,
+            color_by=color_by,
+            top_n=top_n,
+            interaction_use=interaction_use,
+            pair_lr_use=pair_lr_use,
+            ncols=ncols,
+            nrows=nrows,
+            cmap=cmap,
+            figsize=dot_figsize,
+            title=title,
+        )
+        return _maybe_save_show(fig, show=show, save=save), ax
+    if plot_type in {"tile", "source_target_tile"}:
+        if plot_type == "source_target_tile":
+            warnings.warn(
+                "`plot_type='source_target_tile'` is now a compatibility alias of "
+                "`plot_type='tile'`. Prefer `plot_type='tile'`.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        fig, ax = _draw_liana_tileplot(
+            long_df,
+            color_by=color_by,
+            top_n=top_n,
+            interaction_use=interaction_use,
+            pair_lr_use=pair_lr_use,
+            cmap=cmap,
+            figsize=figsize,
+            title=title,
+        )
+        return _maybe_save_show(fig, show=show, save=save), ax
+    if plot_type == "sample_dot":
+        fig, ax = _draw_liana_sample_dot(
+            long_df,
+            sample_key=resolved_sample_key,
+            color_by=color_by,
+            top_n=top_n,
+            top_n_pairs=top_n_pairs,
+            interaction_use=interaction_use,
+            pair_lr_use=pair_lr_use,
+            ncols=ncols,
+            nrows=nrows,
+            cmap=cmap,
+            figsize=figsize,
+            title=title,
+        )
+        return _maybe_save_show(fig, show=show, save=save), ax
+
     matrix, size_matrix, color_label = _communication_matrix(
         long_df,
         display_by=display_by,
@@ -2303,8 +3455,8 @@ def ccc_heatmap(
     if add_text is None:
         add_text = plot_type == "heatmap" and display_by == "aggregation" and matrix.size <= 49
 
-    if plot_type in {"dot", "bubble"}:
-        default_title = "Communication bubble plot" if plot_type == "bubble" else "Communication dot matrix"
+    if plot_type == "bubble":
+        default_title = "Communication bubble plot"
         resolved_title = title or f"{default_title} ({display_color_label})"
         fig, ax = _dot_matrix_plot(
             matrix,
@@ -2535,13 +3687,33 @@ def _draw_arrow_network(
                 edgecolor="white",
             )
 
-    for x_coord, label in column_titles:
-        ax.text(x_coord, 1.01, label, ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
+    column_anchor_offsets = {
+        "Sender": -0.12,
+        "Ligand-Receptor": 0.10,
+        "Receiver": 0.12,
+    }
+    title_anchors = [float(x_coord) + column_anchor_offsets.get(str(label), 0.0) for x_coord, label in column_titles]
 
-    ax.set_xlim(-0.18, 1.28)
-    ax.set_ylim(-0.08, 1.06)
-    ax.set_title(title or "Communication flow", pad=24)
+    if not node_df.empty:
+        x_values = node_df["x"].astype(float).tolist() + title_anchors
+        x_min = min(x_values) - 0.20
+        x_max = max(x_values) + 0.20
+    else:
+        x_min, x_max = -0.30, 1.35
+
+    _draw_network_column_headers(
+        ax,
+        list(zip(title_anchors, [label for _, label in column_titles])),
+        x_min=x_min,
+        x_max=x_max,
+        y_axes=0.90,
+        fontsize=11,
+    )
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-0.03, 1.01)
+    ax.set_title(title or "Communication flow", fontsize=13, pad=8)
     ax.set_axis_off()
+    fig.subplots_adjust(top=0.88, bottom=0.08, left=0.06, right=0.94)
     return fig, ax
 
 
@@ -2651,13 +3823,33 @@ def _draw_sigmoid_network(
                 edgecolor="white",
             )
 
-    for x_coord, label in column_titles:
-        ax.text(x_coord, 1.01, label, ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
+    column_anchor_offsets = {
+        "Sender": -0.12,
+        "Ligand-Receptor": 0.10,
+        "Receiver": 0.12,
+    }
+    title_anchors = [float(x_coord) + column_anchor_offsets.get(str(label), 0.0) for x_coord, label in column_titles]
 
-    ax.set_xlim(-0.18, 1.28)
-    ax.set_ylim(-0.08, 1.06)
-    ax.set_title(title or "Communication sigmoid flow", pad=24)
+    if not node_df.empty:
+        x_values = node_df["x"].astype(float).tolist() + title_anchors
+        x_min = min(x_values) - 0.20
+        x_max = max(x_values) + 0.20
+    else:
+        x_min, x_max = -0.30, 1.35
+
+    _draw_network_column_headers(
+        ax,
+        list(zip(title_anchors, [label for _, label in column_titles])),
+        x_min=x_min,
+        x_max=x_max,
+        y_axes=0.90,
+        fontsize=11,
+    )
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-0.03, 1.01)
+    ax.set_title(title or "Communication sigmoid flow", fontsize=13, pad=8)
     ax.set_axis_off()
+    fig.subplots_adjust(top=0.88, bottom=0.08, left=0.06, right=0.94)
     return fig, ax
 
 
@@ -2717,9 +3909,25 @@ def _draw_bipartite_network(
     receptor_totals = data.groupby("receptor", observed=True)["score"].sum().reindex(receptors).fillna(0.0)
     receiver_totals = data.groupby("receiver", observed=True)["score"].sum().reindex(receivers).fillna(0.0)
 
-    sender_pos = {label: (0.0, pos[1]) for label, pos in _weighted_positions(senders, sender_totals).items()}
+    sender_stage_pos, _, _ = _stacked_stage_positions(
+        senders,
+        sender_totals,
+        wrap_width=18,
+        top=0.86,
+        bottom=0.10,
+        gap=0.028,
+    )
+    sender_pos = {label: (0.0, y_coord) for label, y_coord in sender_stage_pos.items()}
     sender_center = np.median([value[1] for value in sender_pos.values()]) if sender_pos else 0.5
-    receiver_pos = {label: (3.0, pos[1]) for label, pos in _weighted_positions(receivers, receiver_totals).items()}
+    receiver_stage_pos, _, _ = _stacked_stage_positions(
+        receivers,
+        receiver_totals,
+        wrap_width=18,
+        top=0.86,
+        bottom=0.10,
+        gap=0.028,
+    )
+    receiver_pos = {label: (3.0, y_coord) for label, y_coord in receiver_stage_pos.items()}
     receiver_center = np.median([value[1] for value in receiver_pos.values()]) if receiver_pos else sender_center
     bridge_center = float((sender_center + receiver_center) / 2.0)
     ligand_pos = {ligand_name: (1.0, bridge_center)}
@@ -2805,7 +4013,9 @@ def _draw_bipartite_network(
             )
         )
 
-    bridge_label_offset = 0.065
+    bridge_label_offset = 0.0
+    ligand_label_x = 1.0 - 0.10
+    receptor_label_x = 2.0 + 0.10
     for sender, (x_coord, y_coord) in sender_pos.items():
         ax.scatter(x_coord, y_coord, s=280, c=cell_colors[sender], edgecolors="white", linewidths=1.0, zorder=3)
         ax.text(x_coord - 0.08, y_coord, sender, ha="right", va="center", fontsize=10)
@@ -2821,41 +4031,61 @@ def _draw_bipartite_network(
             zorder=3,
         )
         ax.text(
-            x_coord,
+            ligand_label_x,
             y_coord + bridge_label_offset,
             _wrap_plot_label(ligand_display, width=16),
-            ha="center",
-            va="bottom",
+            ha="right",
+            va="center",
             fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 0.2},
+            zorder=4,
         )
     for receptor_label, (x_coord, y_coord) in receptor_pos.items():
         _draw_flow_stage_node(
             ax,
             x_coord=x_coord,
             y_coord=y_coord,
-            label=receptor_display.get(receptor_label, _display_gene_label(receptor_label)),
+            label="",
             weight=float(receptor_totals.get(receptor_label, 0.0)),
             node_max_weight=float(receptor_totals.max()) if not receptor_totals.empty else 1.0,
             wrap_width=18,
             compact_scale=receptor_scale,
             font_scale=receptor_font_scale,
             label_mode="side",
-            text_offset=0.08,
-            text_y_offset=bridge_label_offset,
+            text_offset=0.0,
+            text_y_offset=0.0,
+            text_align="left",
             facecolor=bridge_colors.get(str(receptor_label), "#D9D9D9"),
             edgecolor="white",
+        )
+        ax.text(
+            receptor_label_x,
+            y_coord + bridge_label_offset,
+            _wrap_plot_label(receptor_display.get(receptor_label, _display_gene_label(receptor_label)), width=16),
+            ha="left",
+            va="center",
+            fontsize=max(7.0, 8.8 * receptor_font_scale),
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 0.2},
+            zorder=4,
         )
     for receiver, (x_coord, y_coord) in receiver_pos.items():
         ax.scatter(x_coord, y_coord, s=280, c=cell_colors[receiver], edgecolors="white", linewidths=1.0, zorder=3)
         ax.text(x_coord + 0.08, y_coord, receiver, ha="left", va="center", fontsize=10)
 
-    for x_coord, label in ((0.0, "Sender"), (1.0, "Ligand"), (2.0, "Receptor"), (3.0, "Receiver")):
-        ax.text(x_coord, 0.98, label, ha="center", va="bottom", fontsize=11, transform=ax.transData)
-
-    ax.set_xlim(-0.4, 3.65)
-    ax.set_ylim(-0.1, 1.06)
-    ax.set_title(title or "Communication bipartite network", pad=24)
+    x_min, x_max = -0.4, 3.65
+    _draw_network_column_headers(
+        ax,
+        [(0.0, "Sender"), (1.0, "Ligand"), (2.0, "Receptor"), (3.0, "Receiver")],
+        x_min=x_min,
+        x_max=x_max,
+        y_axes=0.90,
+        fontsize=11,
+    )
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-0.03, 1.01)
+    ax.set_title(title or "Communication bipartite network", fontsize=13, pad=8)
     ax.set_axis_off()
+    fig.subplots_adjust(top=0.88, bottom=0.08, left=0.06, right=0.94)
     return fig, ax
 
 
@@ -2986,8 +4216,6 @@ def _draw_embedding_network(
     max_node_weight = max(node_weights.values(), default=1.0)
     edge_weights = np.array([graph.edges[edge]["weight"] for edge in graph.edges], dtype=float)
     max_edge_weight = float(edge_weights.max()) if edge_weights.size else 1.0
-    label_positions = _embedding_label_positions(coords)
-
     span_x = float(coords["x"].max() - coords["x"].min())
     span_y = float(coords["y"].max() - coords["y"].min())
     pad = max(span_x, span_y, 1.0) * 0.18
@@ -3001,9 +4229,9 @@ def _draw_embedding_network(
             ax.scatter(
                 group["x"],
                 group["y"],
-                s=10,
+                s=8,
                 c=background_colors[str(cell_type)],
-                alpha=0.9,
+                alpha=0.82,
                 linewidths=0.0,
                 zorder=0,
                 label=f"{cell_type}({len(group)})",
@@ -3012,7 +4240,7 @@ def _draw_embedding_network(
     for source, target, data in graph.edges(data=True):
         start = coords.loc[source]
         end = coords.loc[target]
-        linewidth = 0.8 + 4.8 * (float(data["weight"]) / max_edge_weight)
+        linewidth = 0.55 + 3.1 * (float(data["weight"]) / max_edge_weight)
         if source == target:
             loop_center_x = float(start["x"])
             loop_center_y = float(start["y"]) + loop_scale * 0.2
@@ -3020,10 +4248,10 @@ def _draw_embedding_network(
                 (loop_center_x - loop_scale * 0.45, loop_center_y),
                 (loop_center_x + loop_scale * 0.45, loop_center_y),
                 arrowstyle="-|>",
-                mutation_scale=12,
+                mutation_scale=10,
                 linewidth=linewidth,
                 color=colors[source],
-                alpha=0.72,
+                alpha=0.6,
                 connectionstyle="arc3,rad=1.5",
             )
         else:
@@ -3031,57 +4259,46 @@ def _draw_embedding_network(
                 (float(start["x"]), float(start["y"])),
                 (float(end["x"]), float(end["y"])),
                 arrowstyle="-|>",
-                mutation_scale=13,
+                mutation_scale=10,
                 linewidth=linewidth,
                 color=colors[source],
-                alpha=0.72,
+                alpha=0.6,
                 connectionstyle="arc3,rad=0.08",
             )
         ax.add_patch(patch)
 
     for node in nodes:
         row = coords.loc[node]
-        node_size = 180 + 1100 * (node_weights[node] / max_node_weight)
+        node_size = 110 + 820 * (node_weights[node] / max_node_weight)
         ax.scatter(
             float(row["x"]),
             float(row["y"]),
             s=node_size,
             c=colors[node],
             edgecolors="#F7F7F7",
-            linewidths=2.0,
+            linewidths=1.6,
             zorder=3,
-        )
-        label_x, label_y, ha, va = label_positions[node]
-        ax.text(
-            label_x,
-            label_y,
-            node,
-            ha=ha,
-            va=va,
-            fontsize=11,
-            color="#1F1F1F",
-            path_effects=[patheffects.withStroke(linewidth=3.0, foreground="white")],
         )
 
     ax.set_xlim(float(coords["x"].min()) - pad, float(coords["x"].max()) + pad)
     ax.set_ylim(float(coords["y"].min()) - pad, float(coords["y"].max()) + pad)
     ax.set_aspect("equal")
-    ax.set_title(title or "Communication embedding network")
+    ax.set_title(title or "Communication embedding network", fontsize=13, pad=4)
     if background is None or background.empty:
         ax.set_axis_off()
     else:
         axis_labels = adata.uns.get("embedding_axes", ("UMAP_1", "UMAP_2"))
         if len(axis_labels) >= 2:
-            ax.set_xlabel(str(axis_labels[0]))
-            ax.set_ylabel(str(axis_labels[1]))
+            ax.set_xlabel(str(axis_labels[0]), fontsize=11)
+            ax.set_ylabel(str(axis_labels[1]), fontsize=11)
+        ax.tick_params(axis="both", labelsize=9)
         ax.grid(False)
-        n_cells = int(len(background))
-        ax.text(0.0, 1.02, f"nCells:{n_cells}", transform=ax.transAxes, ha="left", va="bottom", fontsize=10)
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             legend = ax.legend(handles, labels, title="CellType", loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+            legend.get_title().set_fontsize(10)
             for text in legend.get_texts():
-                text.set_fontsize(9)
+                text.set_fontsize(8)
     return fig, ax
 
 
@@ -3104,6 +4321,124 @@ def _weighted_positions(labels: list[str], totals: pd.Series) -> dict[str, tuple
     return {label: (0.0, centers[idx]) for idx, label in enumerate(labels)}
 
 
+def _compute_sankey_scale(
+    stage_totals: Sequence[pd.Series],
+    *,
+    top: float,
+    bottom: float,
+    gap: float,
+) -> float:
+    scales = []
+    available_span = max(float(top) - float(bottom), 0.2)
+    for totals in stage_totals:
+        if totals is None or len(totals) == 0:
+            continue
+        total_flow = float(totals.sum())
+        if total_flow <= 0:
+            continue
+        available = available_span - gap * max(len(totals.index) - 1, 0)
+        scales.append(max(available, 0.05) / total_flow)
+    return min(scales) if scales else 0.05
+
+
+def _sankey_stage_layout(
+    labels: Sequence[str],
+    totals: pd.Series,
+    *,
+    top: float,
+    bottom: float,
+    gap: float,
+    scale: float,
+) -> dict[str, dict[str, float]]:
+    layout: dict[str, dict[str, float]] = {}
+    ordered = list(labels)
+    cursor = float(top)
+    for label in ordered:
+        height = float(totals.get(label, 0.0)) * float(scale)
+        top_y = cursor
+        bottom_y = top_y - height
+        layout[str(label)] = {
+            "top": top_y,
+            "bottom": bottom_y,
+            "center": (top_y + bottom_y) / 2.0,
+            "height": height,
+        }
+        cursor = bottom_y - float(gap)
+    return layout
+
+
+def _spread_stage_label_positions(
+    layout: Mapping[str, Mapping[str, float]],
+    *,
+    top: float,
+    bottom: float,
+    min_gap: float,
+) -> dict[str, float]:
+    if not layout:
+        return {}
+    ordered = sorted(
+        ((str(label), float(spec["center"])) for label, spec in layout.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    positions: dict[str, float] = {}
+    cursor = float(top)
+    for label, preferred in ordered:
+        y_pos = min(float(preferred), cursor)
+        positions[label] = y_pos
+        cursor = y_pos - float(min_gap)
+
+    cursor = float(bottom)
+    for label, _ in reversed(ordered):
+        y_pos = max(positions[label], cursor)
+        positions[label] = y_pos
+        cursor = y_pos + float(min_gap)
+    return positions
+
+
+def _assign_sankey_slots(
+    flow_df: pd.DataFrame,
+    *,
+    left_col: str,
+    right_col: str,
+    left_layout: Mapping[str, Mapping[str, float]],
+    right_layout: Mapping[str, Mapping[str, float]],
+    scale: float,
+) -> pd.DataFrame:
+    flow_df = flow_df.copy()
+    flow_df["band_height"] = flow_df["weight"].astype(float) * float(scale)
+    flow_df["source_top"] = np.nan
+    flow_df["source_bottom"] = np.nan
+    flow_df["target_top"] = np.nan
+    flow_df["target_bottom"] = np.nan
+
+    for left_label, subset in flow_df.groupby(left_col, observed=True, sort=False):
+        ordered_idx = subset.assign(
+            _sort_key=subset[right_col].astype(str).map(lambda item: right_layout[str(item)]["center"])
+        ).sort_values("_sort_key", ascending=False).index
+        cursor = float(left_layout[str(left_label)]["top"])
+        for idx in ordered_idx:
+            band_height = float(flow_df.at[idx, "band_height"])
+            flow_df.at[idx, "source_top"] = cursor
+            flow_df.at[idx, "source_bottom"] = cursor - band_height
+            cursor -= band_height
+
+    for right_label, subset in flow_df.groupby(right_col, observed=True, sort=False):
+        ordered_idx = subset.assign(
+            _sort_key=subset[left_col].astype(str).map(lambda item: left_layout[str(item)]["center"])
+        ).sort_values("_sort_key", ascending=False).index
+        cursor = float(right_layout[str(right_label)]["top"])
+        for idx in ordered_idx:
+            band_height = float(flow_df.at[idx, "band_height"])
+            flow_df.at[idx, "target_top"] = cursor
+            flow_df.at[idx, "target_bottom"] = cursor - band_height
+            cursor -= band_height
+
+    flow_df["source_center"] = 0.5 * (flow_df["source_top"] + flow_df["source_bottom"])
+    flow_df["target_center"] = 0.5 * (flow_df["target_top"] + flow_df["target_bottom"])
+    return flow_df
+
+
 def _draw_sankey_flows(
     ax,
     flow_df: pd.DataFrame,
@@ -3116,22 +4451,40 @@ def _draw_sankey_flows(
     width_scale: float,
 ):
     for _, row in flow_df.iterrows():
-        y0 = row[f"{left_col}_y"]
-        y1 = row[f"{right_col}_y"]
+        y0_top = float(row["source_top"])
+        y0_bottom = float(row["source_bottom"])
+        y1_top = float(row["target_top"])
+        y1_bottom = float(row["target_bottom"])
         verts = [
-            (left_x, y0),
-            (left_x + (right_x - left_x) * 0.35, y0),
-            (left_x + (right_x - left_x) * 0.65, y1),
-            (right_x, y1),
+            (left_x, y0_top),
+            (left_x + (right_x - left_x) * 0.35, y0_top),
+            (left_x + (right_x - left_x) * 0.65, y1_top),
+            (right_x, y1_top),
+            (right_x, y1_bottom),
+            (left_x + (right_x - left_x) * 0.65, y1_bottom),
+            (left_x + (right_x - left_x) * 0.35, y0_bottom),
+            (left_x, y0_bottom),
+            (left_x, y0_top),
         ]
-        path = Path(verts, [Path.MOVETO, Path.CURVE4, Path.CURVE4, Path.CURVE4])
+        codes = [
+            Path.MOVETO,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.LINETO,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CURVE4,
+            Path.CLOSEPOLY,
+        ]
+        path = Path(verts, codes)
         patch = PathPatch(
             path,
-            facecolor="none",
-            edgecolor=colors[str(row[left_col])],
-            linewidth=1.0 + width_scale * float(row["weight"]),
-            alpha=0.45,
-            capstyle="round",
+            facecolor=colors[str(row[left_col])],
+            edgecolor="none",
+            linewidth=0.0,
+            alpha=0.38,
+            joinstyle="round",
         )
         ax.add_patch(patch)
 
@@ -3142,10 +4495,12 @@ def _draw_sankey_plot(
     display_by: Literal["aggregation", "interaction"],
     value: Literal["sum", "mean", "max", "count"],
     top_n: int,
+    min_receiver_flow: float,
     palette,
     figsize: tuple[float, float],
     title: str | None,
 ):
+    _validate_display_by(display_by, func_name="_draw_sankey_plot")
     if display_by == "aggregation":
         flow_df = _aggregate_series(long_df.groupby(["sender", "receiver"], observed=True), value).rename("weight").reset_index()
         flow_df = flow_df.sort_values("weight", ascending=False).head(int(top_n))
@@ -3155,14 +4510,30 @@ def _draw_sankey_plot(
         receivers = list(dict.fromkeys(flow_df["receiver"]))
         sender_totals = flow_df.groupby("sender", observed=True)["weight"].sum().sort_values(ascending=False)
         receiver_totals = flow_df.groupby("receiver", observed=True)["weight"].sum().sort_values(ascending=False)
-        sender_pos = _bounded_weighted_positions(senders, sender_totals, top=0.84, bottom=0.08)
-        receiver_pos = _bounded_weighted_positions(receivers, receiver_totals, top=0.84, bottom=0.08)
-        flow_df["sender_y"] = flow_df["sender"].map(lambda item: sender_pos[str(item)][1])
-        flow_df["receiver_y"] = flow_df["receiver"].map(lambda item: receiver_pos[str(item)][1])
+        if min_receiver_flow > 0:
+            keep_receivers = receiver_totals.loc[receiver_totals >= float(min_receiver_flow)].index.astype(str)
+            flow_df = flow_df.loc[flow_df["receiver"].astype(str).isin(keep_receivers)].copy()
+            if flow_df.empty:
+                raise ValueError("No communication flows remain after applying `min_receiver_flow`.")
+            receivers = list(dict.fromkeys(flow_df["receiver"]))
+            sender_totals = flow_df.groupby("sender", observed=True)["weight"].sum().sort_values(ascending=False)
+            receiver_totals = flow_df.groupby("receiver", observed=True)["weight"].sum().sort_values(ascending=False)
+        scale = _compute_sankey_scale((sender_totals, receiver_totals), top=0.84, bottom=0.08, gap=0.02)
+        sender_layout = _sankey_stage_layout(senders, sender_totals, top=0.84, bottom=0.08, gap=0.02, scale=scale)
+        receiver_layout = _sankey_stage_layout(receivers, receiver_totals, top=0.84, bottom=0.08, gap=0.02, scale=scale)
+        flow_df = _assign_sankey_slots(
+            flow_df,
+            left_col="sender",
+            right_col="receiver",
+            left_layout=sender_layout,
+            right_layout=receiver_layout,
+            scale=scale,
+        )
 
         fig, ax = plt.subplots(figsize=figsize)
         node_colors = _choose_palette(sorted(set(senders) | set(receivers)), palette=palette)
-        width_scale = 10.0 / max(float(flow_df["weight"].max()), 1.0)
+        sender_label_pos = _spread_stage_label_positions(sender_layout, top=0.84, bottom=0.08, min_gap=0.04)
+        receiver_label_pos = _spread_stage_label_positions(receiver_layout, top=0.84, bottom=0.08, min_gap=0.04)
         _draw_sankey_flows(
             ax,
             flow_df,
@@ -3171,17 +4542,22 @@ def _draw_sankey_plot(
             left_x=0.15,
             right_x=0.85,
             colors=node_colors,
-            width_scale=width_scale,
+            width_scale=scale,
         )
-        for sender, (x_coord, y_coord) in sender_pos.items():
-            ax.add_patch(Rectangle((0.08, y_coord - 0.03), 0.04, 0.06, facecolor=node_colors[sender], edgecolor="white"))
-            ax.text(0.06, y_coord, sender, ha="right", va="center", fontsize=10)
-        for receiver, (_, y_coord) in receiver_pos.items():
-            ax.add_patch(Rectangle((0.88, y_coord - 0.03), 0.04, 0.06, facecolor=node_colors[receiver], edgecolor="white"))
-            ax.text(0.94, y_coord, receiver, ha="left", va="center", fontsize=10)
+        for sender, layout in sender_layout.items():
+            x_coord = 0.0
+            y_coord = float(layout["center"])
+            half_height = 0.5 * float(layout["height"])
+            ax.add_patch(Rectangle((0.08, y_coord - half_height), 0.04, 2 * half_height, facecolor=node_colors[sender], edgecolor="white"))
+            ax.text(0.06, sender_label_pos.get(sender, y_coord), sender, ha="right", va="center", fontsize=10)
+        for receiver, layout in receiver_layout.items():
+            y_coord = float(layout["center"])
+            half_height = 0.5 * float(layout["height"])
+            ax.add_patch(Rectangle((0.88, y_coord - half_height), 0.04, 2 * half_height, facecolor=node_colors[receiver], edgecolor="white"))
+            ax.text(0.94, receiver_label_pos.get(receiver, y_coord), receiver, ha="left", va="center", fontsize=10)
         ax.text(0.10, 0.90, "Sender", ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
         ax.text(0.90, 0.90, "Receiver", ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
-        fig.subplots_adjust(top=0.90)
+        fig.subplots_adjust(top=0.88, bottom=0.08, left=0.05, right=0.95)
         fig.suptitle(title or "Communication sankey", y=0.985)
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
@@ -3205,29 +4581,49 @@ def _draw_sankey_plot(
     sender_totals = flow_df.groupby("sender", observed=True)["weight"].sum().sort_values(ascending=False)
     interaction_totals = flow_df.groupby("interaction", observed=True)["weight"].sum().sort_values(ascending=False)
     receiver_totals = flow_df.groupby("receiver", observed=True)["weight"].sum().sort_values(ascending=False)
-    sender_pos = _bounded_weighted_positions(senders, sender_totals, top=0.84, bottom=0.08)
-    interaction_y, _, sankey_font_scale = _stacked_stage_positions(
-        interactions,
-        interaction_totals,
-        wrap_width=20,
-        top=0.78,
-        bottom=0.10,
-        gap=0.03,
-    )
-    interaction_pos = {label: (0.0, y_coord) for label, y_coord in interaction_y.items()}
-    receiver_pos = _bounded_weighted_positions(receivers, receiver_totals, top=0.84, bottom=0.08)
+    if min_receiver_flow > 0:
+        keep_receivers = receiver_totals.loc[receiver_totals >= float(min_receiver_flow)].index.astype(str)
+        flow_df = flow_df.loc[flow_df["receiver"].astype(str).isin(keep_receivers)].copy()
+        if flow_df.empty:
+            raise ValueError("No interaction-level communication flows remain after applying `min_receiver_flow`.")
+        receivers = list(dict.fromkeys(flow_df["receiver"]))
+        sender_totals = flow_df.groupby("sender", observed=True)["weight"].sum().sort_values(ascending=False)
+        interaction_totals = flow_df.groupby("interaction", observed=True)["weight"].sum().sort_values(ascending=False)
+        receiver_totals = flow_df.groupby("receiver", observed=True)["weight"].sum().sort_values(ascending=False)
+    scale = _compute_sankey_scale((sender_totals, interaction_totals, receiver_totals), top=0.84, bottom=0.08, gap=0.02)
+    sender_layout = _sankey_stage_layout(senders, sender_totals, top=0.84, bottom=0.08, gap=0.02, scale=scale)
+    interaction_layout = _sankey_stage_layout(interactions, interaction_totals, top=0.78, bottom=0.10, gap=0.025, scale=scale)
+    receiver_layout = _sankey_stage_layout(receivers, receiver_totals, top=0.84, bottom=0.08, gap=0.02, scale=scale)
 
     flow_left = flow_df.groupby(["sender", "interaction"], observed=True)["weight"].sum().rename("weight").reset_index()
-    flow_left["sender_y"] = flow_left["sender"].map(lambda item: sender_pos[str(item)][1])
-    flow_left["interaction_y"] = flow_left["interaction"].map(lambda item: interaction_pos[str(item)][1])
+    flow_left = _assign_sankey_slots(
+        flow_left,
+        left_col="sender",
+        right_col="interaction",
+        left_layout=sender_layout,
+        right_layout=interaction_layout,
+        scale=scale,
+    )
     flow_right = flow_df.groupby(["interaction", "receiver"], observed=True)["weight"].sum().rename("weight").reset_index()
-    flow_right["interaction_y"] = flow_right["interaction"].map(lambda item: interaction_pos[str(item)][1])
-    flow_right["receiver_y"] = flow_right["receiver"].map(lambda item: receiver_pos[str(item)][1])
+    flow_right = _assign_sankey_slots(
+        flow_right,
+        left_col="interaction",
+        right_col="receiver",
+        left_layout=interaction_layout,
+        right_layout=receiver_layout,
+        scale=scale,
+    )
 
     fig, ax = plt.subplots(figsize=figsize)
     cell_colors = _choose_palette(sorted(set(senders) | set(receivers)), palette=palette)
     interaction_colors = _choose_palette(interactions, palette="Set2")
-    width_scale = 9.0 / max(float(max(flow_left["weight"].max(), flow_right["weight"].max())), 1.0)
+    sender_label_pos = _spread_stage_label_positions(sender_layout, top=0.84, bottom=0.08, min_gap=0.04)
+    visible_receivers = {
+        receiver: layout
+        for receiver, layout in receiver_layout.items()
+        if float(layout["height"]) >= 0.016
+    }
+    receiver_label_pos = _spread_stage_label_positions(visible_receivers, top=0.84, bottom=0.08, min_gap=0.028)
     _draw_sankey_flows(
         ax,
         flow_left,
@@ -3236,7 +4632,7 @@ def _draw_sankey_plot(
         left_x=0.12,
         right_x=0.5,
         colors=cell_colors,
-        width_scale=width_scale,
+        width_scale=scale,
     )
     _draw_sankey_flows(
         ax,
@@ -3246,14 +4642,23 @@ def _draw_sankey_plot(
         left_x=0.5,
         right_x=0.88,
         colors=interaction_colors,
-        width_scale=width_scale,
+        width_scale=scale,
     )
-    for sender, (_, y_coord) in sender_pos.items():
-        ax.add_patch(Rectangle((0.06, y_coord - 0.025), 0.04, 0.05, facecolor=cell_colors[sender], edgecolor="white"))
-        ax.text(0.04, y_coord, sender, ha="right", va="center", fontsize=9)
-    for interaction, (_, y_coord) in interaction_pos.items():
+    for sender, layout in sender_layout.items():
+        y_coord = float(layout["center"])
+        half_height = 0.5 * float(layout["height"])
+        ax.add_patch(Rectangle((0.06, y_coord - half_height), 0.04, 2 * half_height, facecolor=cell_colors[sender], edgecolor="white"))
+        ax.text(0.04, sender_label_pos.get(sender, y_coord), sender, ha="right", va="center", fontsize=9)
+    sankey_font_scale = 1.0
+    if interaction_layout:
+        max_height = max(float(layout["height"]) for layout in interaction_layout.values())
+        if max_height > 0:
+            sankey_font_scale = max(0.72, min(1.0, max_height / 0.08))
+    for interaction, layout in interaction_layout.items():
+        y_coord = float(layout["center"])
+        half_height = 0.5 * float(layout["height"])
         ax.add_patch(
-            Rectangle((0.48, y_coord - 0.025), 0.04, 0.05, facecolor=interaction_colors[interaction], edgecolor="white")
+            Rectangle((0.48, y_coord - half_height), 0.04, 2 * half_height, facecolor=interaction_colors[interaction], edgecolor="white")
         )
         ax.text(
             0.535,
@@ -3264,13 +4669,17 @@ def _draw_sankey_plot(
             fontsize=max(7.0, 8.0 * sankey_font_scale),
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 0.2},
         )
-    for receiver, (_, y_coord) in receiver_pos.items():
-        ax.add_patch(Rectangle((0.9, y_coord - 0.025), 0.04, 0.05, facecolor=cell_colors[receiver], edgecolor="white"))
-        ax.text(0.96, y_coord, receiver, ha="left", va="center", fontsize=9)
+    for receiver, layout in receiver_layout.items():
+        y_coord = float(layout["center"])
+        half_height = 0.5 * float(layout["height"])
+        ax.add_patch(Rectangle((0.9, y_coord - half_height), 0.04, 2 * half_height, facecolor=cell_colors[receiver], edgecolor="white"))
+        if receiver in receiver_label_pos:
+            ax.text(0.96, receiver_label_pos[receiver], receiver, ha="left", va="center", fontsize=9)
     ax.text(0.08, 0.90, "Sender", ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
     ax.text(0.50, 0.90, "Ligand-Receptor", ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
     ax.text(0.92, 0.90, "Receiver", ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
     fig.subplots_adjust(top=0.90)
+    fig.subplots_adjust(top=0.88, bottom=0.08, left=0.05, right=0.95)
     fig.suptitle(title or "Interaction sankey", y=0.985)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -3281,12 +4690,12 @@ def _draw_sankey_plot(
 @register_function(
     aliases=["ccc_network_plot", "communication_network_plot", "细胞通讯网络图"],
     category="pl",
-    description="Python-native communication network plots for CellPhoneDB-style communication AnnData.",
+    description="Python-native communication network plots that accept raw analysis AnnData or preformatted communication AnnData.",
     examples=[
-        "ov.pl.ccc_network_plot(comm_adata, plot_type='circle')",
-        "ov.pl.ccc_network_plot(comm_adata, plot_type='arrow', display_by='interaction', signaling='MK')",
-        "ov.pl.ccc_network_plot(comm_adata, plot_type='bipartite', ligand='TGFB1')",
-        "ov.pl.ccc_network_plot(comm_adata, plot_type='embedding_network', node_positions=coords)",
+        "ov.pl.ccc_network_plot(adata, plot_type='circle')",
+        "ov.pl.ccc_network_plot(adata, plot_type='arrow', display_by='interaction', signaling='MK')",
+        "ov.pl.ccc_network_plot(adata, plot_type='bipartite', ligand='TGFB1')",
+        "ov.pl.ccc_network_plot(adata, plot_type='embedding_network', node_positions=coords)",
     ],
     related=["pl.ccc_heatmap", "pl.ccc_stat_plot", "pl.cpdb_network"],
 )
@@ -3318,37 +4727,48 @@ def ccc_network_plot(
     signaling=None,
     interaction_use=None,
     pair_lr_use=None,
+    result_uns_key: str = "liana_res",
+    score_key: str = "specificity_rank",
+    pvalue_key: str = "specificity_rank",
+    inverse_score: bool = True,
+    inverse_pvalue: bool = False,
+    classification: str | Mapping[str, str] | None = None,
+    classification_reference: str | pd.DataFrame | None = "cellchat",
+    classification_fallback: str | None = "family",
     pvalue_threshold: float = 0.05,
     value: Literal["sum", "mean", "max", "count"] = "sum",
     top_n: int = 20,
     ligand: str | None = None,
     receptor=None,
-    layout: Literal["circle", "hierarchy"] = "circle",
     normalize_to_sender: bool = True,
     rotate_names: bool = True,
     min_interaction_threshold: float = 0.0,
     node_positions=None,
     embedding_points=None,
     palette=None,
+    ncols: int | None = None,
+    nrows: int | None = None,
     figsize: tuple[float, float] = (7, 7),
     title: str | None = None,
+    verbose: bool = True,
     show: bool = False,
     save: str | bool = False,
 ):
-    """Plot cell-cell communication networks with multiple graph layouts.
+    """Plot cell-cell communication networks with multiple graph styles.
 
     Parameters
     ----------
     adata : anndata.AnnData
-        Communication AnnData produced by the OmicVerse CCC workflow. The
-        object is expected to contain sender, receiver, ligand-receptor, and
-        pathway level communication summaries used by the selected
-        ``plot_type``.
+        Communication AnnData produced by the OmicVerse CCC workflow, or a
+        regular AnnData containing a LIANA result table in
+        ``adata.uns[result_uns_key]``. LIANA inputs are adapted internally to
+        the communication format expected by ``ccc_*``.
     plot_type : str, default="circle"
         Network style to render. Supported values include aggregated circle
-        views, pathway or interaction flow plots, bipartite ligand-receptor
-        layouts, embedding-based networks, differential comparison networks,
-        chord summaries, and diffusion-style visualizations.
+        views, pathway-filtered circle networks, interaction flow plots,
+        bipartite ligand-receptor layouts, embedding-based networks,
+        differential comparison networks, chord summaries, and diffusion-style
+        visualizations.
     comparison_adata : anndata.AnnData or None, default=None
         Second communication AnnData used by ``plot_type='diff_network'`` to
         compute differential edges between two conditions.
@@ -3368,6 +4788,23 @@ def ccc_network_plot(
     pair_lr_use : str, sequence of str, or None, default=None
         Ligand-receptor pair identifiers used to filter individual or
         interaction-focused plots.
+    result_uns_key : str, default="liana_res"
+        ``adata.uns`` key searched when ``adata`` is not already a
+        communication AnnData.
+    score_key, pvalue_key : str, default="specificity_rank"
+        Columns used when auto-converting LIANA results.
+    inverse_score, inverse_pvalue : bool, default=(True, False)
+        Whether the LIANA score or p-value columns should be inverted during
+        automatic conversion.
+    classification : str, mapping, or None, default=None
+        Optional LIANA classification override used only during automatic
+        conversion.
+    classification_reference : str, pandas.DataFrame, or None, default="cellchat"
+        Reference used to backfill pathway labels during automatic LIANA
+        conversion.
+    classification_fallback : str or None, default="family"
+        Fallback pathway label strategy used during automatic LIANA
+        conversion.
     pvalue_threshold : float, default=0.05
         Maximum p-value retained as a significant communication event.
     value : {"sum", "mean", "max", "count"}, default="sum"
@@ -3381,8 +4818,6 @@ def ccc_network_plot(
         ligand-receptor chord views.
     receptor : str, sequence of str, or None, default=None
         Receptor name or names used by receptor-specific network views.
-    layout : {"circle", "hierarchy"}, default="circle"
-        Layout passed to compatible CellChat-style network backends.
     normalize_to_sender : bool, default=True
         Whether to normalize outgoing edge contributions per sender before
         plotting chord-style networks.
@@ -3399,11 +4834,22 @@ def ccc_network_plot(
         ``embedding_network`` edges.
     palette : mapping, sequence, or None, default=None
         Color palette used for cell types, pathways, or nodes.
+    ncols : int or None, default=None
+        Number of subplot columns used by multi-panel network views such as
+        ``individual_outgoing`` and ``individual_incoming``. When omitted, a
+        plot-specific default is used.
+    nrows : int or None, default=None
+        Number of subplot rows used by multi-panel network views such as
+        ``individual_outgoing`` and ``individual_incoming``. When omitted, the
+        value is inferred from ``ncols`` and the number of selected panels.
     figsize : tuple of float, default=(7, 7)
         Figure size in inches.
     title : str or None, default=None
         Custom title for the generated figure. When omitted, a plot-specific
         default title is used.
+    verbose : bool, default=True
+        Reserved for method-specific progress output. Network views remain
+        silent by default; this parameter keeps the ``ccc_*`` API uniform.
     show : bool, default=False
         Whether to immediately display the figure.
     save : str or bool, default=False
@@ -3415,6 +4861,55 @@ def ccc_network_plot(
         A ``(fig, ax)`` tuple containing the Matplotlib figure and the main
         axes used for the rendered network.
     """
+    _validate_plot_type(
+        plot_type,
+        (
+            "circle",
+            "circle_focused",
+            "individual_outgoing",
+            "individual_incoming",
+            "individual",
+            "arrow",
+            "sigmoid",
+            "embedding_network",
+            "pathway",
+            "chord",
+            "lr_chord",
+            "gene_chord",
+            "diffusion",
+            "diff_network",
+            "individual_lr",
+            "bipartite",
+        ),
+        func_name="ccc_network_plot",
+    )
+    _validate_display_by(display_by, func_name="ccc_network_plot")
+
+    adata = _resolve_comm_adata(
+        adata,
+        arg_name="adata",
+        result_uns_key=result_uns_key,
+        score_key=score_key,
+        pvalue_key=pvalue_key,
+        inverse_score=inverse_score,
+        inverse_pvalue=inverse_pvalue,
+        classification=classification,
+        classification_reference=classification_reference,
+        classification_fallback=classification_fallback,
+    )
+    if comparison_adata is not None:
+        comparison_adata = _resolve_comm_adata(
+            comparison_adata,
+            arg_name="comparison_adata",
+            result_uns_key=result_uns_key,
+            score_key=score_key,
+            pvalue_key=pvalue_key,
+            inverse_score=inverse_score,
+            inverse_pvalue=inverse_pvalue,
+            classification=classification,
+            classification_reference=classification_reference,
+            classification_fallback=classification_fallback,
+        )
     if plot_type == "circle_focused":
         signaling_values = _normalize_use_arg(signaling)
         _raise_for_unsupported_arguments(
@@ -3459,8 +4954,6 @@ def ccc_network_plot(
         _raise_for_unsupported_arguments(
             plot_type,
             comparison_adata=comparison_adata,
-            sender_use=sender_use,
-            receiver_use=receiver_use,
             signaling=signaling,
             interaction_use=interaction_use,
             pair_lr_use=pair_lr_use,
@@ -3474,20 +4967,20 @@ def ccc_network_plot(
             edge_width_max=12,
             show_labels=True,
             figsize=figsize,
-            ncols=4,
+            ncols=ncols,
+            nrows=nrows,
+            sender_use=_normalize_use_arg(sender_use),
+            receiver_use=_normalize_use_arg(receiver_use),
             use_sender_colors=True,
+            title=title,
         )
         ax = _largest_content_axis(fig)
-        if title:
-            fig.suptitle(title)
         return _maybe_save_show(fig, show=show, save=save), ax
 
     if plot_type == "individual_incoming":
         _raise_for_unsupported_arguments(
             plot_type,
             comparison_adata=comparison_adata,
-            sender_use=sender_use,
-            receiver_use=receiver_use,
             signaling=signaling,
             interaction_use=interaction_use,
             pair_lr_use=pair_lr_use,
@@ -3501,12 +4994,14 @@ def ccc_network_plot(
             edge_width_max=12,
             show_labels=True,
             figsize=figsize,
-            ncols=4,
+            ncols=ncols,
+            nrows=nrows,
+            sender_use=_normalize_use_arg(sender_use),
+            receiver_use=_normalize_use_arg(receiver_use),
             use_sender_colors=True,
+            title=title,
         )
         ax = _largest_content_axis(fig)
-        if title:
-            fig.suptitle(title)
         return _maybe_save_show(fig, show=show, save=save), ax
 
     if plot_type == "individual":
@@ -3529,8 +5024,8 @@ def ccc_network_plot(
             pairLR_use=pair_lr,
             sources_use=_normalize_use_arg(sender_use),
             targets_use=_normalize_use_arg(receiver_use),
-            layout=layout,
-            vertex_receiver=_normalize_use_arg(receiver_use) if layout == "hierarchy" else None,
+            layout="circle",
+            vertex_receiver=None,
             pvalue_threshold=pvalue_threshold,
             figsize=figsize,
             title=title or "Individual ligand-receptor communication",
@@ -3580,6 +5075,7 @@ def ccc_network_plot(
             rotate_names=rotate_names,
             figsize=figsize,
             title_name=title or "Gene-level chord diagram",
+            show_legend=False,
             save=None,
         )
         return _maybe_save_show(fig, show=show, save=save), ax
@@ -3605,7 +5101,7 @@ def ccc_network_plot(
             sources=_normalize_use_arg(sender_use),
             targets=_normalize_use_arg(receiver_use),
             pvalue_threshold=pvalue_threshold,
-            count_min=1,
+            count_min=0,
             rotate_names=rotate_names,
             figsize=figsize,
             title_name=title or "Ligand-receptor chord diagram",
@@ -3706,12 +5202,6 @@ def ccc_network_plot(
             receptor=receptor,
         )
         pathway_signaling = _require_use_argument(plot_type, "signaling", signaling)
-        if layout != "hierarchy":
-            _raise_for_unsupported_arguments(
-                plot_type,
-                sender_use=sender_use,
-                receiver_use=receiver_use,
-            )
 
     edge_df = _aggregated_pair_frame(
         adata,
@@ -3788,9 +5278,9 @@ def ccc_network_plot(
         viz = _build_cellchatviz(adata, palette=palette)
         fig, ax = viz.netVisual_aggregate(
             signaling=pathway_signaling,
-            layout=layout,
-            vertex_receiver=_normalize_use_arg(receiver_use) if layout == "hierarchy" else None,
-            vertex_sender=_normalize_use_arg(sender_use) if layout == "hierarchy" else None,
+            layout="circle",
+            vertex_receiver=None,
+            vertex_sender=None,
             pvalue_threshold=pvalue_threshold,
             figsize=figsize,
             vertex_size_max=10,
@@ -4210,11 +5700,11 @@ def _draw_gene_expression_plot(
 @register_function(
     aliases=["ccc_stat_plot", "communication_stat_plot", "细胞通讯统计图"],
     category="pl",
-    description="Python-native summary and distribution plots for CellPhoneDB-style communication AnnData.",
+    description="Python-native communication summary plots that accept raw analysis AnnData or preformatted communication AnnData.",
     examples=[
-        "ov.pl.ccc_stat_plot(comm_adata, plot_type='bar', group_by='interaction')",
-        "ov.pl.ccc_stat_plot(comm_adata, plot_type='sankey', display_by='interaction')",
-        "ov.pl.ccc_stat_plot(comm_adata, plot_type='scatter')",
+        "ov.pl.ccc_stat_plot(adata, plot_type='bar', group_by='interaction')",
+        "ov.pl.ccc_stat_plot(adata, plot_type='sankey', display_by='interaction')",
+        "ov.pl.ccc_stat_plot(adata, plot_type='scatter')",
     ],
     related=["pl.ccc_heatmap", "pl.ccc_network_plot", "pl.CellChatViz"],
 )
@@ -4246,6 +5736,14 @@ def ccc_stat_plot(
     signaling=None,
     interaction_use=None,
     pair_lr_use=None,
+    result_uns_key: str = "liana_res",
+    score_key: str = "specificity_rank",
+    pvalue_key: str = "specificity_rank",
+    inverse_score: bool = True,
+    inverse_pvalue: bool = False,
+    classification: str | Mapping[str, str] | None = None,
+    classification_reference: str | pd.DataFrame | None = "cellchat",
+    classification_fallback: str | None = "family",
     pvalue_threshold: float = 0.05,
     group_by: Literal["interaction", "classification", "pair", "sender", "receiver"] = "interaction",
     compare_by: Literal["overall", "celltype"] = "overall",
@@ -4255,6 +5753,7 @@ def ccc_stat_plot(
     facet_by: Literal["sender", "receiver"] | None = None,
     value: Literal["sum", "mean", "max", "count"] = "sum",
     top_n: int = 20,
+    min_receiver_flow: float = 0.0,
     pathway_method: str = "mean",
     min_lr_pairs: int = 1,
     min_expression: float = 0.1,
@@ -4265,6 +5764,7 @@ def ccc_stat_plot(
     cmap: str = "RdYlBu_r",
     figsize: tuple[float, float] = (8, 5),
     title: str | None = None,
+    verbose: bool = True,
     show: bool = False,
     save: str | bool = False,
 ):
@@ -4273,9 +5773,10 @@ def ccc_stat_plot(
     Parameters
     ----------
     adata : anndata.AnnData
-        Communication AnnData produced by the OmicVerse CCC workflow. The
-        object should contain pathway-, interaction-, and cell-pair-level
-        communication summaries used by the selected ``plot_type``.
+        Communication AnnData produced by the OmicVerse CCC workflow, or a
+        regular AnnData containing a LIANA result table in
+        ``adata.uns[result_uns_key]``. LIANA inputs are adapted internally to
+        the communication format expected by ``ccc_*``.
     plot_type : str, default="bar"
         Summary view to render. Supported values include bar plots, sankey
         diagrams, score distributions, signaling role analyses, pathway
@@ -4302,6 +5803,23 @@ def ccc_stat_plot(
         Interaction names used to restrict interaction-level statistics.
     pair_lr_use : str, sequence of str, or None, default=None
         Ligand-receptor pair identifiers used by pair-specific statistics.
+    result_uns_key : str, default="liana_res"
+        ``adata.uns`` key searched when ``adata`` is not already a
+        communication AnnData.
+    score_key, pvalue_key : str, default="specificity_rank"
+        Columns used when auto-converting LIANA results.
+    inverse_score, inverse_pvalue : bool, default=(True, False)
+        Whether the LIANA score or p-value columns should be inverted during
+        automatic conversion.
+    classification : str, mapping, or None, default=None
+        Optional LIANA classification override used only during automatic
+        conversion.
+    classification_reference : str, pandas.DataFrame, or None, default="cellchat"
+        Reference used to backfill pathway labels during automatic LIANA
+        conversion.
+    classification_fallback : str or None, default="family"
+        Fallback pathway label strategy used during automatic LIANA
+        conversion.
     pvalue_threshold : float, default=0.05
         Maximum p-value retained as a significant communication event.
     group_by : {"interaction", "classification", "pair", "sender", "receiver"}, default="interaction"
@@ -4325,6 +5843,11 @@ def ccc_stat_plot(
     top_n : int, default=20
         Number of top pathways, interactions, or pairs retained in ranked
         summaries.
+    min_receiver_flow : float, default=0.0
+        Minimum total flow required for a receiver node to be retained in
+        Sankey plots. This is mainly useful for
+        ``plot_type='sankey', display_by='interaction'`` when many tiny
+        receiver nodes make the right side unreadable.
     pathway_method : str, default="mean"
         Method used to summarize multiple ligand-receptor pairs into pathway
         level scores.
@@ -4350,6 +5873,9 @@ def ccc_stat_plot(
     title : str or None, default=None
         Custom title for the generated figure. When omitted, a plot-specific
         default title is used.
+    verbose : bool, default=True
+        Whether pathway-summary style plots should print progress messages and
+        summary tables. This currently affects ``plot_type='pathway_summary'``.
     show : bool, default=False
         Whether to immediately display the figure.
     save : str or bool, default=False
@@ -4361,6 +5887,32 @@ def ccc_stat_plot(
         A ``(fig, ax)`` tuple containing the Matplotlib figure and the main
         axes used for the rendered statistical summary.
     """
+    _validate_display_by(display_by, func_name="ccc_stat_plot")
+    adata = _resolve_comm_adata(
+        adata,
+        arg_name="adata",
+        result_uns_key=result_uns_key,
+        score_key=score_key,
+        pvalue_key=pvalue_key,
+        inverse_score=inverse_score,
+        inverse_pvalue=inverse_pvalue,
+        classification=classification,
+        classification_reference=classification_reference,
+        classification_fallback=classification_fallback,
+    )
+    if comparison_adata is not None:
+        comparison_adata = _resolve_comm_adata(
+            comparison_adata,
+            arg_name="comparison_adata",
+            result_uns_key=result_uns_key,
+            score_key=score_key,
+            pvalue_key=pvalue_key,
+            inverse_score=inverse_score,
+            inverse_pvalue=inverse_pvalue,
+            classification=classification,
+            classification_reference=classification_reference,
+            classification_fallback=classification_fallback,
+        )
     if plot_type == "role_network":
         _raise_for_unsupported_arguments(
             plot_type,
@@ -4476,30 +6028,77 @@ def ccc_stat_plot(
             strength_threshold=strength_threshold,
             pvalue_threshold=pvalue_threshold,
             min_significant_pairs=min_significant_pairs,
+            verbose=verbose,
         )
         summary = summary.sort_values(["is_significant", "total_strength"], ascending=[False, False]).head(int(top_n))
-        min_height = max(figsize[1], 0.42 * len(summary.index) + 1.6)
-        if min_height > figsize[1]:
-            figsize = (figsize[0], min_height)
         fig, ax = plt.subplots(figsize=figsize)
+        summary_title_fontsize = 13
+        summary_tick_fontsize = summary_title_fontsize
+        summary_bar_label_fontsize = summary_title_fontsize - 1
         pathway_names = summary["pathway"].astype(str).tolist()
         colors = _choose_palette(pathway_names, palette=palette)
         bar_colors = [colors[name] if is_sig else "#D9D9D9" for name, is_sig in zip(pathway_names, summary["is_significant"])]
-        ax.barh(pathway_names, summary["total_strength"], color=bar_colors)
+        bars = ax.barh(pathway_names, summary["total_strength"], color=bar_colors)
         ax.invert_yaxis()
-        for y_pos, (_, row) in enumerate(summary.iterrows()):
-            ax.text(
-                float(row["total_strength"]),
-                y_pos,
-                f"  {int(row['n_significant_pairs'])}/{int(row['n_active_cell_pairs'])} sig",
-                va="center",
-                ha="left",
-                fontsize=8,
-                color="#4A4A4A",
+        max_strength = float(summary["total_strength"].max()) if not summary.empty else 0.0
+        label_padding = 0.015 * max(max_strength, 1.0)
+        outside_padding = 0.012 * max(max_strength, 1.0)
+        has_outside_labels = False
+        for bar, (_, row), bar_color in zip(bars, summary.iterrows(), bar_colors):
+            bar_width = float(row["total_strength"])
+            label = f"{int(row['n_significant_pairs'])}/{int(row['n_active_cell_pairs'])} sig"
+            label_width = _text_width_in_data_units(
+                fig,
+                ax,
+                label,
+                fontsize=summary_bar_label_fontsize,
             )
+            fits_inside = (
+                label_width is not None
+                and bar_width >= label_width + 2.0 * label_padding
+            )
+            if fits_inside:
+                text_x = max(bar_width - label_padding, label_width + label_padding)
+                text_ha = "right"
+                text_color = _contrasting_text_color(bar_color)
+            else:
+                text_x = bar_width + outside_padding
+                text_ha = "left"
+                text_color = "#4A4A4A"
+                has_outside_labels = True
+            ax.text(
+                text_x,
+                float(bar.get_y() + bar.get_height() / 2.0),
+                label,
+                va="center",
+                ha=text_ha,
+                fontsize=summary_bar_label_fontsize,
+                color=text_color,
+            )
+        if max_strength > 0:
+            outside_extent = max(
+                (
+                    float(row["total_strength"]) + outside_padding
+                    + (
+                        _text_width_in_data_units(
+                            fig,
+                            ax,
+                            f"{int(row['n_significant_pairs'])}/{int(row['n_active_cell_pairs'])} sig",
+                            fontsize=summary_bar_label_fontsize,
+                        )
+                        or 0.0
+                    )
+                )
+                for _, row in summary.iterrows()
+            )
+            x_upper = outside_extent + label_padding if has_outside_labels else max_strength * 1.001
+            ax.set_xlim(0, x_upper)
+        ax.margins(x=0.0)
+        ax.tick_params(axis="y", labelsize=summary_tick_fontsize)
         ax.set_xlabel("Total pathway communication strength")
         ax.set_ylabel("")
-        ax.set_title(title or "Significant pathway communication summary")
+        ax.set_title(title or "Significant pathway communication summary", fontsize=summary_title_fontsize)
+        ax.grid(axis="x", alpha=0.22, linewidth=0.7)
         return _maybe_save_show(fig, show=show, save=save), ax
 
     long_df = _communication_long_table(
@@ -4520,6 +6119,7 @@ def ccc_stat_plot(
             display_by=display_by,
             value=value,
             top_n=top_n,
+            min_receiver_flow=min_receiver_flow,
             palette=palette,
             figsize=figsize,
             title=title,
@@ -4581,17 +6181,48 @@ def ccc_stat_plot(
             if len(contribution_result) == 3 and hasattr(contribution_result[1], "savefig"):
                 _, fig, axes = contribution_result
                 if isinstance(axes, tuple):
-                    ax = axes[0]
+                    if len(axes) >= 2:
+                        bar_ax, contribution_ax = axes[0], axes[1]
+                    else:
+                        bar_ax = axes[0]
+                        contribution_ax = axes[0]
                 else:
-                    ax = _largest_content_axis(fig)
+                    figure_axes = list(fig.axes)
+                    bar_ax = figure_axes[0] if figure_axes else _largest_content_axis(fig)
+                    contribution_ax = figure_axes[1] if len(figure_axes) > 1 else bar_ax
+                left_cmap, right_cmap = _resolve_dual_cmaps(cmap)
+                bar_widths = np.array([float(bar.get_width()) for bar in bar_ax.patches], dtype=float)
+                if bar_widths.size:
+                    width_norm = Normalize(vmin=float(bar_widths.min()), vmax=float(bar_widths.max()) if float(bar_widths.max()) > float(bar_widths.min()) else float(bar_widths.min()) + 1.0)
+                    left_cmap_obj = plt.get_cmap(left_cmap)
+                    for bar, width in zip(bar_ax.patches, bar_widths):
+                        bar.set_facecolor(left_cmap_obj(width_norm(float(width))))
+                        bar.set_alpha(0.92)
+                        bar.set_edgecolor("#3A4FB7")
+                        bar.set_linewidth(1.0)
+                bar_ax.invert_yaxis()
+                _style_lr_contribution_bar_axis(bar_ax)
+                if contribution_ax is not bar_ax:
+                    for collection in contribution_ax.collections:
+                        if hasattr(collection, "set_cmap"):
+                            collection.set_cmap(plt.get_cmap(right_cmap))
+                    _style_lr_contribution_scatter_axis(contribution_ax)
+                if len(fig.axes) > 2:
+                    for extra_ax in fig.axes:
+                        if extra_ax in {bar_ax, contribution_ax}:
+                            continue
+                        ylabel = extra_ax.get_ylabel()
+                        if ylabel and "Contribution" in ylabel:
+                            for collection in contribution_ax.collections:
+                                if hasattr(collection, "changed"):
+                                    collection.changed()
+                fig.subplots_adjust(wspace=0.34)
+                ax = bar_ax
             else:
                 fig, _ = contribution_result
                 ax = _largest_content_axis(fig)
             if title:
                 ax.set_title(title)
-            for contribution_ax in fig.axes:
-                if "Activity vs Significance" in contribution_ax.get_title():
-                    _style_scatter_axis(contribution_ax, max_marker_size=260.0, arrow=False)
             return _maybe_save_show(fig, show=show, save=save), ax
 
         fig, ax = plt.subplots(figsize=figsize)
@@ -4818,6 +6449,8 @@ def ccc_stat_plot(
 
     if plot_type == "bar":
         summary = _group_metric_summary(long_df, group_key="plot_group", value=value).head(int(top_n))
+        summary_title_fontsize = 13
+        summary_tick_fontsize = 13
         colors = _choose_palette(summary.index.astype(str).tolist(), palette=palette)
         ax.barh(summary.index.astype(str), summary.values, color=[colors[idx] for idx in summary.index.astype(str)])
         ax.invert_yaxis()
@@ -4825,9 +6458,12 @@ def ccc_stat_plot(
             np.arange(len(summary.index), dtype=float),
             labels=[_wrap_plot_label(label, width=22) for label in summary.index.astype(str)],
         )
+        ax.tick_params(axis="y", labelsize=summary_tick_fontsize)
+        ax.tick_params(axis="x", labelsize=summary_tick_fontsize - 1)
         ax.set_xlabel("Communication score" if value != "count" else "Significant interactions")
         ax.set_ylabel("")
-        ax.set_title(title or f"Top communication groups by {group_by}")
+        ax.set_title(title or f"Top communication groups by {group_by}", fontsize=summary_title_fontsize)
+        ax.grid(axis="x", alpha=0.22, linewidth=0.7)
         return _maybe_save_show(fig, show=show, save=save), ax
 
     if plot_type in {"violin", "box"} and facet_by in {"sender", "receiver", "pair"} and group_by == "interaction":

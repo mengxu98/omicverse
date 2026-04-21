@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import math
 from scipy import sparse
 import networkx as nx
 from matplotlib.patches import FancyBboxPatch, ConnectionPatch
@@ -77,6 +78,93 @@ class CellChatViz(CellChatVizPlus):
         self.n_cell_types = len(self.cell_types)
         self.palette = self._validate_palette(palette)
         self._color_cache = None  # Cache for consistent colors across all methods
+
+    def _resolve_individual_panel_layout(self, panel_names, ncols=None, nrows=None):
+        n_panels = len(panel_names)
+        if n_panels == 0:
+            raise ValueError("No cell types remain after applying sender/receiver filters.")
+        if ncols is None and nrows is None:
+            ncols = min(4, n_panels)
+            nrows = math.ceil(n_panels / ncols)
+        elif ncols is None:
+            nrows = int(nrows)
+            if nrows <= 0:
+                raise ValueError("`nrows` must be a positive integer.")
+            ncols = math.ceil(n_panels / nrows)
+        elif nrows is None:
+            ncols = int(ncols)
+            if ncols <= 0:
+                raise ValueError("`ncols` must be a positive integer.")
+            nrows = math.ceil(n_panels / ncols)
+        else:
+            ncols = int(ncols)
+            nrows = int(nrows)
+            if ncols <= 0 or nrows <= 0:
+                raise ValueError("`ncols` and `nrows` must be positive integers.")
+            if ncols * nrows < n_panels:
+                raise ValueError("`ncols * nrows` must be large enough for the selected cell types.")
+        return int(ncols), int(nrows)
+
+    def _add_compact_individual_colorbar(
+        self,
+        fig,
+        axes,
+        global_max_weight,
+        use_sender_colors,
+        cmap,
+        legend_labels=None,
+    ):
+        if global_max_weight <= 0:
+            return
+        visible_axes = [ax for ax in np.ravel(axes) if ax.get_visible()]
+        if not visible_axes:
+            return
+        bboxes = [ax.get_position() for ax in visible_axes]
+        left = min(b.x0 for b in bboxes)
+        right = max(b.x1 for b in bboxes)
+        bottom = min(b.y0 for b in bboxes)
+        top = max(b.y1 for b in bboxes)
+        union_height = max(top - bottom, 0.1)
+        if use_sender_colors:
+            legend_labels = list(self.cell_types if legend_labels is None else legend_labels)
+            if not legend_labels:
+                return
+            cell_colors = self._get_cell_type_colors()
+            handles = [
+                mpatches.Patch(color=cell_colors.get(label, '#1f77b4'), label=label)
+                for label in legend_labels
+            ]
+            ncol = 1 if len(handles) <= 8 else 2
+            fig.legend(
+                handles=handles,
+                title='Sender',
+                loc='center left',
+                bbox_to_anchor=(min(right + 0.012, 0.84), bottom + 0.5 * union_height),
+                bbox_transform=fig.transFigure,
+                frameon=False,
+                fontsize=6,
+                title_fontsize=7,
+                handlelength=0.9,
+                handleheight=0.5,
+                handletextpad=0.4,
+                columnspacing=0.7,
+                borderaxespad=0.0,
+                ncol=ncol,
+            )
+            return
+        cbar_height = min(union_height * 0.24, 0.24)
+        cbar_width = 0.008
+        cbar_y = bottom + 0.5 * union_height - 0.5 * cbar_height
+        cbar_x = min(right + 0.018, 0.965 - cbar_width)
+        cbar_ax = fig.add_axes([cbar_x, cbar_y, cbar_width, cbar_height])
+        sm = plt.cm.ScalarMappable(
+            cmap=plt.cm.get_cmap(cmap),
+            norm=plt.Normalize(vmin=0, vmax=global_max_weight),
+        )
+        sm.set_array([])
+        cbar = plt.colorbar(sm, cax=cbar_ax)
+        cbar.set_label('Interaction strength', rotation=270, labelpad=10, fontsize=8)
+        cbar.ax.tick_params(labelsize=7, length=2)
         
     def _get_unique_cell_types(self):
         """Get unique cell types from sender and receiver"""
@@ -709,7 +797,7 @@ class CellChatViz(CellChatVizPlus):
             interaction_means = means[i, :]
             # Apply count_min threshold (interactions below threshold are set to 0)
             filtered_means = np.where(interaction_means >= count_min, interaction_means, 0)
-            mean_matrix[sender_idx, receiver_idx] = np.sum(filtered_means)
+            mean_matrix[sender_idx, receiver_idx] += np.sum(filtered_means)
         
         # Convert to DataFrame for easier handling
         mean_df = pd.DataFrame(mean_matrix, 
@@ -733,7 +821,8 @@ class CellChatViz(CellChatVizPlus):
             Sender-by-receiver matrix of aggregated p-values.
         """
         # Initialize matrix
-        pvalue_matrix = np.ones((self.n_cell_types, self.n_cell_types))  # Default p=1
+        pvalue_sum = np.zeros((self.n_cell_types, self.n_cell_types))
+        pvalue_count = np.zeros((self.n_cell_types, self.n_cell_types))
         
         # Get data
         pvalues = self.adata.layers['pvalues']
@@ -751,11 +840,12 @@ class CellChatViz(CellChatVizPlus):
             valid_mask = interaction_means >= count_min
             
             if np.any(valid_mask):
-                # Compute average p-value for valid interactions
-                pvalue_matrix[sender_idx, receiver_idx] = np.mean(interaction_pvals[valid_mask])
-            else:
-                # No valid interactions, keep default p=1
-                pvalue_matrix[sender_idx, receiver_idx] = 1.0
+                pvalue_sum[sender_idx, receiver_idx] += float(np.sum(interaction_pvals[valid_mask]))
+                pvalue_count[sender_idx, receiver_idx] += float(np.sum(valid_mask))
+
+        pvalue_matrix = np.ones((self.n_cell_types, self.n_cell_types))
+        valid_entries = pvalue_count > 0
+        pvalue_matrix[valid_entries] = pvalue_sum[valid_entries] / pvalue_count[valid_entries]
         
         # Convert to DataFrame for easier handling
         pvalue_df = pd.DataFrame(pvalue_matrix, 
@@ -864,6 +954,8 @@ class CellChatViz(CellChatVizPlus):
             pathway_matrix = np.zeros((self.n_cell_types, self.n_cell_types))
             pathway_pvalue_matrix = np.ones((self.n_cell_types, self.n_cell_types))
             valid_interactions_matrix = np.zeros((self.n_cell_types, self.n_cell_types))
+            pooled_means = [[[] for _ in range(self.n_cell_types)] for _ in range(self.n_cell_types)]
+            pooled_pvals = [[[] for _ in range(self.n_cell_types)] for _ in range(self.n_cell_types)]
             
             for i, (sender, receiver) in enumerate(zip(self.adata.obs['sender'], self.adata.obs['receiver'])):
                 sender_idx = self.cell_types.index(sender)
@@ -877,10 +969,17 @@ class CellChatViz(CellChatVizPlus):
                 valid_mask = pathway_means >= min_expression
                 
                 if np.any(valid_mask):
-                    valid_means = pathway_means[valid_mask]
-                    valid_pvals = pathway_pvals[valid_mask]
-                    
-                    # Calculate pathway-level communication strength
+                    pooled_means[sender_idx][receiver_idx].append(np.asarray(pathway_means[valid_mask], dtype=float))
+                    pooled_pvals[sender_idx][receiver_idx].append(np.asarray(pathway_pvals[valid_mask], dtype=float))
+
+            for sender_idx in range(self.n_cell_types):
+                for receiver_idx in range(self.n_cell_types):
+                    if not pooled_means[sender_idx][receiver_idx]:
+                        continue
+
+                    valid_means = np.concatenate(pooled_means[sender_idx][receiver_idx])
+                    valid_pvals = np.concatenate(pooled_pvals[sender_idx][receiver_idx])
+
                     if method == 'mean':
                         pathway_strength = np.mean(valid_means)
                     elif method == 'sum':
@@ -891,18 +990,10 @@ class CellChatViz(CellChatVizPlus):
                         pathway_strength = np.median(valid_means)
                     else:
                         raise ValueError(f"Unknown method: {method}")
-                    
-                    # Calculate pathway-level p-value (use minimum p-value as pathway significance)
-                    pathway_pval = np.min(valid_pvals)
-                    
+
                     pathway_matrix[sender_idx, receiver_idx] = pathway_strength
-                    pathway_pvalue_matrix[sender_idx, receiver_idx] = pathway_pval
+                    pathway_pvalue_matrix[sender_idx, receiver_idx] = np.min(valid_pvals)
                     valid_interactions_matrix[sender_idx, receiver_idx] = len(valid_means)
-                else:
-                    # No valid interactions
-                    pathway_matrix[sender_idx, receiver_idx] = 0
-                    pathway_pvalue_matrix[sender_idx, receiver_idx] = 1.0
-                    valid_interactions_matrix[sender_idx, receiver_idx] = 0
             
             # Store pathway communication results
             pathway_communication[pathway] = {
@@ -1286,7 +1377,9 @@ class CellChatViz(CellChatVizPlus):
     
     def netVisual_individual_circle(self, pvalue_threshold=0.05, vertex_size_max=50, 
                                    edge_width_max=10, show_labels=True, cmap='Blues', 
-                                   figsize=(20, 15), ncols=4, use_sender_colors=True):
+                                   figsize=(20, 15), ncols=None, nrows=None,
+                                   sender_use=None, receiver_use=None,
+                                   use_sender_colors=True, title=None):
         """
         Plot one outgoing communication circle per cell type.
 
@@ -1311,11 +1404,20 @@ class CellChatViz(CellChatVizPlus):
             ``use_sender_colors=False``.
         figsize : tuple
             Figure size in inches as ``(width, height)``.
-        ncols : int
+        ncols : int or None
             Number of columns in the subplot grid.
+        nrows : int or None
+            Number of rows in the subplot grid.
+        sender_use : sequence of str or None
+            Optional sender cell types to keep as individual panels.
+        receiver_use : sequence of str or None
+            Optional receiver cell types to keep as outgoing targets inside each
+            panel.
         use_sender_colors : bool
             If ``True``, color each edge by sender cell type (CellChat-like
             style); otherwise use the numeric colormap from ``cmap``.
+        title : str or None
+            Optional figure-level title.
         
         Returns
         -------
@@ -1330,15 +1432,18 @@ class CellChatViz(CellChatVizPlus):
         if global_max_weight == 0:
             global_max_weight = 1  # Avoid division by zero
         
-        # Calculate subplot layout
-        nrows = (self.n_cell_types + ncols - 1) // ncols
-        
+        panel_names = list(self.cell_types if sender_use is None else sender_use)
+        receiver_filter = None if receiver_use is None else set(receiver_use)
+        invalid_senders = [ct for ct in panel_names if ct not in self.cell_types]
+        if invalid_senders:
+            raise ValueError(f"Invalid sender cell types: {invalid_senders}. Available cell types: {self.cell_types}")
+        invalid_receivers = [ct for ct in receiver_filter or [] if ct not in self.cell_types]
+        if invalid_receivers:
+            raise ValueError(f"Invalid receiver cell types: {invalid_receivers}. Available cell types: {self.cell_types}")
+        ncols, nrows = self._resolve_individual_panel_layout(panel_names, ncols=ncols, nrows=nrows)
+
         # Create figure with subplots
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
-        if nrows == 1:
-            axes = axes.reshape(1, -1)
-        elif ncols == 1:
-            axes = axes.reshape(-1, 1)
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
         
         # Create circular layout (same for all subplots)
         angles = np.linspace(0, 2*np.pi, self.n_cell_types, endpoint=False)
@@ -1354,15 +1459,21 @@ class CellChatViz(CellChatVizPlus):
         # Get cell type colors for consistency
         cell_colors = self._get_cell_type_colors()
         
-        for i in range(self.n_cell_types):
+        for panel_idx, panel_name in enumerate(panel_names):
             # Calculate subplot position
-            row = i // ncols
-            col = i % ncols
+            row = panel_idx // ncols
+            col = panel_idx % ncols
             ax = axes[row, col]
+            i = self.cell_types.index(panel_name)
             
             # Create individual matrix (only outgoing from cell type i)
             individual_matrix = np.zeros_like(weight_matrix)
-            individual_matrix[i, :] = weight_matrix[i, :]
+            if receiver_filter is None:
+                individual_matrix[i, :] = weight_matrix[i, :]
+            else:
+                for receiver_name in receiver_filter:
+                    receiver_idx = self.cell_types.index(receiver_name)
+                    individual_matrix[i, receiver_idx] = weight_matrix[i, receiver_idx]
             
             # Create graph for this cell type
             G = nx.DiGraph()
@@ -1415,51 +1526,35 @@ class CellChatViz(CellChatVizPlus):
                 label_pos = {j: (1.2*np.cos(angle), 1.2*np.sin(angle)) 
                            for j, angle in enumerate(angles)}
                 labels = {j: self.cell_types[j] for j in range(self.n_cell_types)}
-                nx.draw_networkx_labels(G, label_pos, labels, font_size=8, ax=ax)
+                nx.draw_networkx_labels(G, label_pos, labels, font_size=7, ax=ax)
             
             # Set title with cell type name and use sender color
             title_color = cell_colors.get(self.cell_types[i], '#000000')
-            ax.set_title(self.cell_types[i], fontsize=12, pad=10, weight='bold', color=title_color)
+            ax.set_title(self.cell_types[i], fontsize=10, pad=5, weight='bold', color=title_color)
             ax.set_xlim(-1.4, 1.4)
             ax.set_ylim(-1.4, 1.4)
             ax.axis('off')
         
         # Hide unused subplots
-        for i in range(self.n_cell_types, nrows * ncols):
+        for i in range(len(panel_names), nrows * ncols):
             row = i // ncols
             col = i % ncols
             axes[row, col].axis('off')
         
-        # Add a single colorbar for the entire figure
-        if global_max_weight > 0:
-            # Create colorbar on the right side
-            cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-            if use_sender_colors:
-                # Use a neutral colormap for the colorbar when using sender colors
-                sm = plt.cm.ScalarMappable(cmap='viridis', 
-                                          norm=plt.Normalize(vmin=0, vmax=global_max_weight))
-                sm.set_array([])
-                cbar = plt.colorbar(sm, cax=cbar_ax)
-                cbar.set_label('Interaction Strength\n(Colors: Sender Cell Types)', rotation=270, labelpad=25)
-            else:
-                sm = plt.cm.ScalarMappable(cmap=plt.cm.get_cmap(cmap), 
-                                          norm=plt.Normalize(vmin=0, vmax=global_max_weight))
-                sm.set_array([])
-                cbar = plt.colorbar(sm, cax=cbar_ax)
-                cbar.set_label('Interaction Strength', rotation=270, labelpad=20)
-        
-        # Add main title
-        fig.suptitle('Individual Cell Type Communication Networks\n(Outgoing Signals with Sender Colors)', 
-                    fontsize=16, y=0.95)
-        
-        plt.tight_layout()
-        plt.subplots_adjust(right=0.9)
+        fig.suptitle(
+            title or 'Individual cell type communication networks (outgoing)',
+            fontsize=12,
+            y=0.955,
+        )
+        plt.tight_layout(rect=[0, 0, 0.99, 0.965])
         
         return fig
     
     def netVisual_individual_circle_incoming(self, pvalue_threshold=0.05, vertex_size_max=50, 
                                            edge_width_max=10, show_labels=True, cmap='Reds', 
-                                           figsize=(20, 15), ncols=4, use_sender_colors=True):
+                                           figsize=(20, 15), ncols=None, nrows=None,
+                                           sender_use=None, receiver_use=None,
+                                           use_sender_colors=True, title=None):
         """
         Plot one incoming communication circle per cell type.
 
@@ -1484,11 +1579,20 @@ class CellChatViz(CellChatVizPlus):
             ``use_sender_colors=False``.
         figsize : tuple
             Figure size in inches as ``(width, height)``.
-        ncols : int
+        ncols : int or None
             Number of columns in the subplot grid.
+        nrows : int or None
+            Number of rows in the subplot grid.
+        sender_use : sequence of str or None
+            Optional sender cell types to keep as incoming sources inside each
+            panel.
+        receiver_use : sequence of str or None
+            Optional receiver cell types to keep as individual panels.
         use_sender_colors : bool
             If ``True``, color edges by sender identity so incoming signal origin
             is visually explicit.
+        title : str or None
+            Optional figure-level title.
         
         Returns
         -------
@@ -1503,15 +1607,18 @@ class CellChatViz(CellChatVizPlus):
         if global_max_weight == 0:
             global_max_weight = 1  # Avoid division by zero
         
-        # Calculate subplot layout
-        nrows = (self.n_cell_types + ncols - 1) // ncols
-        
+        panel_names = list(self.cell_types if receiver_use is None else receiver_use)
+        sender_filter = None if sender_use is None else set(sender_use)
+        invalid_receivers = [ct for ct in panel_names if ct not in self.cell_types]
+        if invalid_receivers:
+            raise ValueError(f"Invalid receiver cell types: {invalid_receivers}. Available cell types: {self.cell_types}")
+        invalid_senders = [ct for ct in sender_filter or [] if ct not in self.cell_types]
+        if invalid_senders:
+            raise ValueError(f"Invalid sender cell types: {invalid_senders}. Available cell types: {self.cell_types}")
+        ncols, nrows = self._resolve_individual_panel_layout(panel_names, ncols=ncols, nrows=nrows)
+
         # Create figure with subplots
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
-        if nrows == 1:
-            axes = axes.reshape(1, -1)
-        elif ncols == 1:
-            axes = axes.reshape(-1, 1)
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
         
         # Create circular layout (same for all subplots)
         angles = np.linspace(0, 2*np.pi, self.n_cell_types, endpoint=False)
@@ -1527,15 +1634,21 @@ class CellChatViz(CellChatVizPlus):
         # Get cell type colors for consistency
         cell_colors = self._get_cell_type_colors()
         
-        for i in range(self.n_cell_types):
+        for panel_idx, panel_name in enumerate(panel_names):
             # Calculate subplot position
-            row = i // ncols
-            col = i % ncols
+            row = panel_idx // ncols
+            col = panel_idx % ncols
             ax = axes[row, col]
+            i = self.cell_types.index(panel_name)
             
             # Create individual matrix (only incoming to cell type i)
             individual_matrix = np.zeros_like(weight_matrix)
-            individual_matrix[:, i] = weight_matrix[:, i]
+            if sender_filter is None:
+                individual_matrix[:, i] = weight_matrix[:, i]
+            else:
+                for sender_name in sender_filter:
+                    sender_idx = self.cell_types.index(sender_name)
+                    individual_matrix[sender_idx, i] = weight_matrix[sender_idx, i]
             
             # Create graph for this cell type
             G = nx.DiGraph()
@@ -1598,45 +1711,27 @@ class CellChatViz(CellChatVizPlus):
                 label_pos = {j: (1.2*np.cos(angle), 1.2*np.sin(angle)) 
                            for j, angle in enumerate(angles)}
                 labels = {j: self.cell_types[j] for j in range(self.n_cell_types)}
-                nx.draw_networkx_labels(G, label_pos, labels, font_size=8, ax=ax)
+                nx.draw_networkx_labels(G, label_pos, labels, font_size=7, ax=ax)
             
             # Set title with cell type name and use receiver color (target cell type)
             title_color = cell_colors.get(self.cell_types[i], '#000000')
-            ax.set_title(self.cell_types[i], fontsize=12, pad=10, weight='bold', color=title_color)
+            ax.set_title(self.cell_types[i], fontsize=10, pad=5, weight='bold', color=title_color)
             ax.set_xlim(-1.4, 1.4)
             ax.set_ylim(-1.4, 1.4)
             ax.axis('off')
         
         # Hide unused subplots
-        for i in range(self.n_cell_types, nrows * ncols):
+        for i in range(len(panel_names), nrows * ncols):
             row = i // ncols
             col = i % ncols
             axes[row, col].axis('off')
         
-        # Add a single colorbar for the entire figure
-        if global_max_weight > 0:
-            # Create colorbar on the right side
-            cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-            if use_sender_colors:
-                # Use a neutral colormap for the colorbar when using sender colors
-                sm = plt.cm.ScalarMappable(cmap='viridis', 
-                                          norm=plt.Normalize(vmin=0, vmax=global_max_weight))
-                sm.set_array([])
-                cbar = plt.colorbar(sm, cax=cbar_ax)
-                cbar.set_label('Interaction Strength\n(Colors: Sender Cell Types)', rotation=270, labelpad=25)
-            else:
-                sm = plt.cm.ScalarMappable(cmap=plt.cm.get_cmap(cmap), 
-                                          norm=plt.Normalize(vmin=0, vmax=global_max_weight))
-                sm.set_array([])
-                cbar = plt.colorbar(sm, cax=cbar_ax)
-                cbar.set_label('Interaction Strength', rotation=270, labelpad=20)
-        
-        # Add main title
-        fig.suptitle('Individual Cell Type Communication Networks\n(Incoming Signals with Sender Colors)', 
-                    fontsize=16, y=0.95)
-        
-        plt.tight_layout()
-        plt.subplots_adjust(right=0.9)
+        fig.suptitle(
+            title or 'Individual cell type communication networks (incoming)',
+            fontsize=12,
+            y=0.955,
+        )
+        plt.tight_layout(rect=[0, 0, 0.99, 0.965])
         
         return fig
     
@@ -1683,7 +1778,8 @@ class CellChatViz(CellChatVizPlus):
     
     def netVisual_heatmap_marsilea(self, signaling=None, pvalue_threshold=0.05, 
                                 color_heatmap="Reds", add_dendrogram=True,
-                                add_row_sum=True, add_col_sum=True, 
+                                add_row_sum=True, add_col_sum=True,
+                                show_row_names=False, show_col_names=False,
                                 linewidth=0.5, figsize=(8, 6), title="Communication Heatmap"):
         """
         Draw a CellChat-style communication heatmap with Marsilea.
@@ -1706,6 +1802,10 @@ class CellChatViz(CellChatVizPlus):
             If ``True``, annotate outgoing total strength per sender cell type.
         add_col_sum : bool
             If ``True``, annotate incoming total strength per receiver cell type.
+        show_row_names : bool
+            If ``True``, place sender cell-type labels beside the heatmap rows.
+        show_col_names : bool
+            If ``True``, place receiver cell-type labels below the heatmap columns.
         linewidth : float
             Cell border width in the heatmap.
         figsize : tuple
@@ -1798,6 +1898,10 @@ class CellChatViz(CellChatVizPlus):
         # Add cell type color bars
         h.add_left(ma.plotter.Colors(self.cell_types,palette=row_colors),size=0.2,legend=False)
         h.add_top(ma.plotter.Colors(self.cell_types,palette=col_colors),size=0.2)
+        if show_row_names:
+            h.add_left(ma.plotter.Labels(self.cell_types, fontsize=9), pad=0.08)
+        if show_col_names:
+            h.add_bottom(ma.plotter.Labels(self.cell_types, fontsize=9), pad=0.08)
         
         # Add legends
         h.add_legends()
@@ -1815,6 +1919,7 @@ class CellChatViz(CellChatVizPlus):
     def netVisual_heatmap_marsilea_focused(self, signaling=None, pvalue_threshold=0.05,
                                           min_interaction_threshold=0, color_heatmap="Reds", 
                                           add_dendrogram=True, add_row_sum=True, add_col_sum=True,
+                                          show_row_names=False, show_col_names=False,
                                           linewidth=0.5, figsize=(8, 6), title="Communication Heatmap"):
         """
         Draw a focused Marsilea heatmap keeping only active cell types.
@@ -1840,6 +1945,10 @@ class CellChatViz(CellChatVizPlus):
             If ``True``, show outgoing totals as side annotations.
         add_col_sum : bool
             If ``True``, show incoming totals as top annotations.
+        show_row_names : bool
+            If ``True``, place sender cell-type labels beside the focused heatmap rows.
+        show_col_names : bool
+            If ``True``, place receiver cell-type labels below the focused heatmap columns.
         linewidth : float
             Cell border width in the heatmap.
         figsize : tuple
@@ -1953,6 +2062,10 @@ class CellChatViz(CellChatVizPlus):
             size=0.14,
             pad=0.02,
         )
+        if show_row_names:
+            h.add_left(ma.plotter.Labels(active_cell_types, fontsize=9), pad=0.08)
+        if show_col_names:
+            h.add_bottom(ma.plotter.Labels(active_cell_types, fontsize=9), pad=0.08)
         
         # Add legends
         h.add_legends()
@@ -2060,7 +2173,7 @@ class CellChatViz(CellChatVizPlus):
         return fig, ax
     
     def netVisual_hierarchy(self, pathway_name=None, sources=None, targets=None,
-                           pvalue_threshold=0.05, figsize=(14, 10)):
+                           pvalue_threshold=0.05, top_n=None, figsize=(14, 10)):
         """
         Visualize directed communication as a two-layer hierarchy plot.
 
@@ -2078,6 +2191,9 @@ class CellChatViz(CellChatVizPlus):
             Optional receiver cell types to keep.
         pvalue_threshold : float
             P-value threshold for selecting significant ligand-receptor pairs.
+        top_n : int or None
+            Maximum number of sender->receiver edges retained after pathway
+            filtering. When ``None``, keep all significant edges.
         figsize : tuple
             Figure size in inches as ``(width, height)``.
 
@@ -2131,59 +2247,95 @@ class CellChatViz(CellChatVizPlus):
             ax.text(0.5, 0.5, 'No interactions found for specified sources/targets', 
                    ha='center', va='center', fontsize=16)
             return fig, ax
-        
-        sources_unique = df_int['source'].unique()
-        targets_unique = df_int['target'].unique()
-        
+
+        if top_n is not None and top_n > 0 and len(df_int) > top_n:
+            df_int = df_int.sort_values('weight', ascending=False).head(int(top_n)).copy()
+
+        outgoing_strength = df_int.groupby('source', observed=True)['weight'].sum().sort_values(ascending=False)
+        incoming_strength = df_int.groupby('target', observed=True)['weight'].sum().sort_values(ascending=False)
+        sources_unique = outgoing_strength.index.astype(str).tolist()
+        targets_unique = incoming_strength.index.astype(str).tolist()
+
         # Position nodes
-        source_y = np.linspace(0.1, 0.9, len(sources_unique))
-        target_y = np.linspace(0.1, 0.9, len(targets_unique))
-        
-        source_pos = {cell: (0.2, y) for cell, y in zip(sources_unique, source_y)}
-        target_pos = {cell: (0.8, y) for cell, y in zip(targets_unique, target_y)}
-        
+        top_margin = 0.92
+        bottom_margin = 0.08
+        source_y = np.linspace(bottom_margin, top_margin, len(sources_unique))
+        target_y = np.linspace(bottom_margin, top_margin, len(targets_unique))
+
+        source_x = 0.14
+        target_x = 0.86
+        source_pos = {cell: (source_x, y) for cell, y in zip(sources_unique, source_y)}
+        target_pos = {cell: (target_x, y) for cell, y in zip(targets_unique, target_y)}
+
+        max_nodes = max(len(sources_unique), len(targets_unique), 1)
+        node_height = float(np.clip(0.78 / max_nodes, 0.03, 0.065))
+        node_width = 0.18 if max_nodes <= 8 else 0.16
+        font_size = int(np.clip(12 - 0.28 * max_nodes, 7, 11))
+
         # Draw nodes
         # Get consistent cell type colors
         cell_colors = self._get_cell_type_colors()
         
         for cell, (x, y) in source_pos.items():
-            cell_color = cell_colors.get(cell, '#lightblue')
-            rect = FancyBboxPatch((x-0.08, y-0.03), 0.16, 0.06,
-                                 boxstyle="round,pad=0.01",
-                                 facecolor=cell_color, edgecolor='black', alpha=0.7)
+            cell_color = cell_colors.get(cell, '#ADD8E6')
+            rect = FancyBboxPatch((x - node_width / 2.0, y - node_height / 2.0),
+                                 node_width, node_height,
+                                 boxstyle="round,pad=0.008,rounding_size=0.014",
+                                 facecolor=cell_color, edgecolor='#5B5B5B', linewidth=1.0, alpha=0.82)
             ax.add_patch(rect)
-            ax.text(x, y, cell, ha='center', va='center', fontsize=10)
+            ax.text(x, y, cell, ha='center', va='center', fontsize=font_size)
         
         for cell, (x, y) in target_pos.items():
-            cell_color = cell_colors.get(cell, '#lightcoral')
-            rect = FancyBboxPatch((x-0.08, y-0.03), 0.16, 0.06,
-                                 boxstyle="round,pad=0.01",
-                                 facecolor=cell_color, edgecolor='black', alpha=0.7)
+            cell_color = cell_colors.get(cell, '#F08080')
+            rect = FancyBboxPatch((x - node_width / 2.0, y - node_height / 2.0),
+                                 node_width, node_height,
+                                 boxstyle="round,pad=0.008,rounding_size=0.014",
+                                 facecolor=cell_color, edgecolor='#5B5B5B', linewidth=1.0, alpha=0.82)
             ax.add_patch(rect)
-            ax.text(x, y, cell, ha='center', va='center', fontsize=10)
+            ax.text(x, y, cell, ha='center', va='center', fontsize=font_size)
         
         # Draw edges
         max_weight = df_int['weight'].max()
+        edge_groups = {}
         for _, row in df_int.iterrows():
             source = row['source']
             target = row['target']
             weight = row['weight']
-            
             if source in source_pos and target in target_pos:
-                arrow = ConnectionPatch(source_pos[source], target_pos[target],
-                                      "data", "data",
-                                      arrowstyle="->", shrinkA=10, shrinkB=10,
-                                      mutation_scale=20, fc="gray",
-                                      linewidth=weight/max_weight * 5,
-                                      alpha=0.6)
+                edge_groups.setdefault(source, []).append((target, float(weight)))
+
+        for source, edges in edge_groups.items():
+            sender_color = cell_colors.get(source, '#1f77b4')
+            custom_cmap = self._create_custom_colormap(sender_color)
+            weights = [weight for _, weight in edges]
+            if len(weights) > 1 and max(weights) > min(weights):
+                norm_weights = [(weight - min(weights)) / (max(weights) - min(weights)) for weight in weights]
+            else:
+                norm_weights = [0.55] * len(weights)
+
+            for (target, weight), color_scale in zip(edges, norm_weights):
+                arrow = ConnectionPatch(
+                    source_pos[source],
+                    target_pos[target],
+                    "data",
+                    "data",
+                    arrowstyle="->",
+                    shrinkA=14,
+                    shrinkB=14,
+                    mutation_scale=12,
+                    fc=custom_cmap(color_scale),
+                    ec=custom_cmap(color_scale),
+                    linewidth=0.8 + (weight / max_weight) * 3.2,
+                    alpha=0.5,
+                )
                 ax.add_artist(arrow)
         
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.set_title(f'Hierarchy Plot{" - " + pathway_name if pathway_name else ""}', 
-                    fontsize=16)
-        ax.text(0.2, -0.05, 'Sources', ha='center', fontsize=12, weight='bold')
-        ax.text(0.8, -0.05, 'Targets', ha='center', fontsize=12, weight='bold')
+                    fontsize=15)
+        ax.text(source_x, -0.035, 'Sources', ha='center', fontsize=12, weight='bold')
+        ax.text(target_x, -0.035, 'Targets', ha='center', fontsize=12, weight='bold')
         ax.axis('off')
         
         plt.tight_layout()
@@ -2368,7 +2520,7 @@ class CellChatViz(CellChatVizPlus):
                     
                     sig_mask = pvals < pvalue_threshold
                     if np.any(sig_mask):
-                        matrix[sender_idx, receiver_idx] = np.sum(means[sig_mask])
+                        matrix[sender_idx, receiver_idx] += np.sum(means[sig_mask])
             
             pathway_networks[pathway] = matrix
         
@@ -2815,6 +2967,7 @@ class CellChatViz(CellChatVizPlus):
                 sources=source_cells,
                 targets=target_cells,
                 pvalue_threshold=pvalue_threshold,
+                top_n=top_n,
                 figsize=figsize
             )
             
@@ -2888,7 +3041,7 @@ class CellChatViz(CellChatVizPlus):
                     all_pathway_means.extend(valid_means)
                     
                     # Check if there are significant interactions
-                    if np.any(valid_pvals < 0.05):
+                    if np.any(valid_pvals < pathway_pvalue_threshold):
                         significant_cell_pairs.append(f"{sender}|{receiver}")
             
             if len(all_pathway_pvals) == 0:
@@ -2923,18 +3076,20 @@ class CellChatViz(CellChatVizPlus):
                 combined_pval = 1.0
                 combined_stat = 0.0
             
+            significant_mask = all_pathway_pvals < pathway_pvalue_threshold
+
             # Calculate pathway statistics
             pathway_stats[pathway] = {
                 'n_lr_pairs': len(pathway_lr_pairs),
                 'n_tests': len(all_pathway_pvals),
-                'n_significant_interactions': np.sum(all_pathway_pvals < 0.05),
+                'n_significant_interactions': np.sum(significant_mask),
                 'mean_expression': np.mean(all_pathway_means),
                 'max_expression': np.max(all_pathway_means),
                 'combined_pvalue': combined_pval,
                 'combined_statistic': combined_stat,
-                'significant_cell_pairs': significant_cell_pairs,
+                'significant_cell_pairs': list(dict.fromkeys(significant_cell_pairs)),
                 'lr_pairs': pathway_lr_pairs,
-                'significance_rate': np.sum(all_pathway_pvals < 0.05) / len(all_pathway_pvals)
+                'significance_rate': np.sum(significant_mask) / len(all_pathway_pvals)
             }
             
             pathway_pvalues.append(combined_pval)
@@ -3370,7 +3525,9 @@ class CellChatViz(CellChatVizPlus):
         
         # Add title
         if title_name:
-            ax.set_title(title_name, fontsize=fontsize + 4, pad=20)
+            ax.set_title("")
+            fig.suptitle(title_name, fontsize=fontsize + 1, y=0.97)
+            fig.subplots_adjust(top=0.76)
         
         # Save file
         if save:
@@ -3574,7 +3731,8 @@ class CellChatViz(CellChatVizPlus):
             ax.text(0.5, 0.5, message, ha='center', va='center', fontsize=16)
             ax.axis('off')
             if title_name:
-                ax.set_title(title_name, fontsize=16, pad=20)
+                ax.set_title("")
+                fig.suptitle(title_name, fontsize=14, y=0.97)
             return fig, ax
         
         # Prepare colors
@@ -3624,7 +3782,9 @@ class CellChatViz(CellChatVizPlus):
         # Add title
         if title_name is None:
             title_name = f"Ligand-Receptor Communication{title_suffix}"
-        ax.set_title(title_name, fontsize=fontsize + 4, pad=20)
+        ax.set_title("")
+        fig.suptitle(title_name, fontsize=fontsize + 1, y=0.97)
+        fig.subplots_adjust(top=0.76)
         
         # Save file
         if save:

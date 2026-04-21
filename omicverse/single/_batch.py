@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Optional
+
 from ..pp import scale,pca
 import scanpy as sc
 import numpy as np
@@ -18,13 +22,16 @@ _BATCH_OBSM = {
     "scVI":      "X_scVI",
     "CellANOVA": "X_cellanova",
     "Concord":   "X_concord",
+    "cca":       "X_cca",
+    "seurat_cca": "X_cca",
+    "CCA":       "X_cca",
 }
 
 @monitor
 @register_function(
     aliases=["批次校正", "batch_correction", "batch_correct", "数据整合", "去批次效应"],
     category="single",
-    description="Comprehensive batch effect correction using multiple methods including Harmony, Combat, Scanorama, scVI, and CellANOVA",
+    description="Comprehensive batch effect correction using multiple methods including Harmony, Combat, Scanorama, scVI, CellANOVA, Concord, and Seurat-style CCA",
     prerequisites={
         'optional_functions': ['preprocess', 'scale', 'pca']
     },
@@ -49,7 +56,10 @@ _BATCH_OBSM = {
         "# CellANOVA with control samples",
         "control_dict = {'pool1': ['batch1', 'batch2']}",
         "ov.single.batch_correction(adata, batch_key='batch', methods='CellANOVA',",
-        "                           control_dict=control_dict)"
+        "                           control_dict=control_dict)",
+        "# Seurat-style CCA (no PyTorch, no CUDA; pure scipy)",
+        "ov.single.batch_correction(adata, batch_key='batch', methods='cca',",
+        "                           n_pcs=30)",
     ],
     related=["pp.preprocess", "utils.mde", "utils.embedding"]
 )
@@ -71,9 +81,13 @@ def batch_correction(adata:anndata.AnnData,batch_key:str,
     methods : str, default='harmony'
         Integration backend. Supported values include ``'harmony'``,
         ``'combat'``, ``'scanorama'``, ``'scVI'``, ``'CellANOVA'``,
-        and ``'Concord'``.
+        ``'Concord'``, and ``'cca'`` / ``'seurat_cca'`` — the pure-Python
+        port of ``Seurat::RunCCA`` (via the `pyccasc` package, no R /
+        rpy2 required).
     n_pcs : int, default=50
-        Number of principal components used when recomputing embeddings.
+        Number of principal components / canonical components used by the
+        selected backend. For ``'cca'`` this is the number of canonical
+        components (``num_cc`` in pyccasc terms).
     **kwargs
         Additional method-specific keyword arguments passed to the selected
         backend implementation.
@@ -266,7 +280,162 @@ def batch_correction(adata:anndata.AnnData,batch_key:str,
         cur_ccd.fit_transform(output_key='X_concord')
         add_reference(adata,'Concord','batch correction with Concord')
         return cur_ccd
+    elif methods in ('cca', 'seurat_cca', 'CCA'):
+        # Helper raises ImportError with a pyccasc install hint on its own
+        # if cca_py is missing; no need for a double import guard here.
+        _run_cca_batch_correction(
+            adata, batch_key=batch_key, n_pcs=n_pcs, **kwargs,
+        )
+        add_reference(adata, 'CCA', 'batch correction with Seurat CCA '
+                                     '(pyccasc)')
+        return adata
     else:
         print('Not supported')
+
+
+_CCA_HELPER_KWARGS = {
+    "reference", "layer", "features", "standardize_inputs",
+    "seed", "key_added",
+}
+
+
+def _run_cca_batch_correction(
+    adata: anndata.AnnData,
+    *,
+    batch_key: str,
+    n_pcs: int = 50,
+    reference: Optional[str] = None,
+    layer: Optional[str] = None,
+    features: Optional[list] = None,
+    standardize_inputs: bool = True,
+    seed: Optional[int] = None,
+    key_added: str = "X_cca",
+    **kwargs,
+) -> anndata.AnnData:
+    """Seurat-style CCA integration over an arbitrary batch count.
+
+    Delegates the 2-batch case to ``cca_py.run_cca_anndata`` and
+    generalises to N batches by running pairwise CCA against a
+    reference batch (the largest batch by default, or the batch named
+    by ``reference=``). Non-reference batches get their own CCA
+    projection; the reference uses its projection from the *first*
+    pair.
+
+    All per-batch embeddings are concatenated in the original sample
+    order and written to ``adata.obsm[key_added]`` so downstream
+    neighbours/UMAP/clustering can consume it like any other embedding.
+
+    Parameters
+    ----------
+    adata, batch_key
+        As in :func:`batch_correction`.
+    n_pcs
+        Forwarded as ``num_cc`` to pyccasc.
+    reference
+        Name of the batch to use as the CCA reference when there are
+        >2 batches. ``None`` → use the largest batch. Ignored for the
+        2-batch case (either batch can play the reference role).
+    layer, features, standardize_inputs, key_added
+        Forwarded to ``cca_py.run_cca_anndata``.
+    seed
+        Reproducibility seed forwarded to pyccasc. ``None`` (default)
+        matches the scikit-learn ``random_state=None`` convention —
+        pass e.g. ``seed=42`` for deterministic runs.
+    **kwargs
+        Unrecognised kwargs are warned and dropped rather than raised,
+        to match the loose-kwarg contract of the other
+        :func:`batch_correction` backends.
+    """
+    import warnings
+    try:
+        from cca_py import run_cca_anndata
+    except ImportError as exc:
+        raise ImportError(
+            "methods='cca' needs the pyccasc package "
+            "(pure-Python Seurat RunCCA, no R required). "
+            "Install with `pip install pyccasc`."
+        ) from exc
+
+    if kwargs:
+        warnings.warn(
+            "methods='cca' ignored unknown kwargs "
+            f"{sorted(kwargs)} — supported kwargs are "
+            f"{sorted(_CCA_HELPER_KWARGS)}.",
+            UserWarning, stacklevel=3,
+        )
+
+    batches = adata.obs[batch_key].astype(str).to_numpy()
+    # order-preserving deduplification: keep batches in first-seen order
+    unique = list(dict.fromkeys(batches))
+    if len(unique) < 2:
+        raise ValueError(
+            f"{batch_key!r} has {len(unique)} unique values; "
+            f"CCA integration requires ≥2 batches."
+        )
+
+    # One split per batch label (keeps indices so we can re-assemble)
+    splits = {b: adata[batches == b].copy() for b in unique}
+
+    if len(unique) == 2:
+        a_name, b_name = unique
+        run_cca_anndata(
+            splits[a_name], splits[b_name],
+            features=features, layer=layer,
+            num_cc=n_pcs,
+            standardize_inputs=standardize_inputs,
+            key_added=key_added,
+            seed=seed,
+        )
+    else:
+        # Choose reference batch: explicit arg > largest
+        if reference is not None:
+            if reference not in splits:
+                raise KeyError(
+                    f"reference={reference!r} not in {batch_key!r} "
+                    f"(have {unique})"
+                )
+            ref_name = reference
+        else:
+            ref_name = max(unique, key=lambda b: splits[b].n_obs)
+        non_ref = [b for b in unique if b != ref_name]
+        # Invariant: we keep the reference's CCA projection from the
+        # **first** pair. Subsequent pairs would overwrite it inside
+        # splits[ref_name].obsm, so we snapshot after the first call and
+        # restore at the end. ``ref_emb`` is guaranteed to be populated
+        # because non_ref is non-empty (len(unique) >= 3 here).
+        ref_emb = None
+        for i, other in enumerate(non_ref):
+            # run_cca_anndata writes both adata1 (ref) and adata2 (other)
+            # — we reuse the reference's projection from the *first*
+            # pair, discard it on subsequent pairs. Strict anchors à la
+            # Seurat 3 are a v2 follow-up.
+            run_cca_anndata(
+                splits[ref_name], splits[other],
+                features=features, layer=layer,
+                num_cc=n_pcs,
+                standardize_inputs=standardize_inputs,
+                key_added=key_added,
+                seed=seed,
+            )
+            if i == 0:
+                ref_emb = splits[ref_name].obsm[key_added].copy()
+        # Re-install the first-pair ref embedding (overwritten by later
+        # pair calls).
+        splits[ref_name].obsm[key_added] = ref_emb
+
+    # Concatenate back to the original adata in sample order
+    emb_dim = next(iter(splits.values())).obsm[key_added].shape[1]
+    full = np.empty((adata.n_obs, emb_dim), dtype=np.float64)
+    for b in unique:
+        idx = np.where(batches == b)[0]
+        full[idx] = splits[b].obsm[key_added]
+    adata.obsm[key_added] = full
+    adata.uns.setdefault("cca", {})[key_added] = {
+        "num_cc": int(n_pcs),
+        "n_batches": len(unique),
+        "batches": unique,
+        "reference": reference,
+    }
+    return adata
 
     

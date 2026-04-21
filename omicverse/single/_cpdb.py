@@ -454,6 +454,8 @@ def cellphonedb_v5(adata,
                            cleanup_temp=True,
                            debug=False,
                            separator='|',
+                           results_key: str = 'cpdb_results',
+                           comm_key: str = 'cpdb_comm',
                            **kwargs):
     """
     Run CellPhoneDB statistical analysis with proper file handling
@@ -496,7 +498,10 @@ def cellphonedb_v5(adata,
     Returns
     -------
     Tuple[dict,anndata.AnnData]
-        Raw CellPhoneDB result dict and formatted AnnData for visualization.
+        Raw CellPhoneDB result dict and formatted communication AnnData. The
+        same objects are also written to ``adata.uns[results_key]`` and
+        ``adata.uns[comm_key]`` so downstream ``ov.pl.ccc_*`` plots can work
+        directly on the original ``adata``.
     """
     import os
     import tempfile
@@ -651,7 +656,9 @@ def cellphonedb_v5(adata,
         # Step 7: Format results for visualization
         print("   - Formatting results for visualization...")
         
-        adata_cpdb = format_cpdb_results_for_viz(cpdb_results, separator=separator)
+        adata_cpdb = format_cpdb_results(cpdb_results, separator=separator)
+        adata.uns[results_key] = cpdb_results
+        adata.uns[comm_key] = adata_cpdb
         
         print(f"   - Created visualization AnnData: {adata_cpdb.shape}")
         print(f"   - Cell interactions: {adata_cpdb.n_obs}")
@@ -673,7 +680,7 @@ def cellphonedb_v5(adata,
         print("✅ CellPhoneDB analysis pipeline completed!")
 
 
-def format_cpdb_results_for_viz(cpdb_results, separator='|'):
+def format_cpdb_results(cpdb_results, separator='|'):
     """
     Format CellPhoneDB results into AnnData object for CellChatViz
     
@@ -732,8 +739,14 @@ def format_cpdb_results_for_viz(cpdb_results, separator='|'):
     # Add interaction classification if available
     if 'classification' in adata_cpdb.var.columns:
         print(f"   - Found {adata_cpdb.var['classification'].nunique()} pathway classifications")
-    
+    adata_cpdb.uns["comm_source"] = "cellphonedb"
+    adata_cpdb.uns["cpdb_separator"] = separator
     return adata_cpdb
+
+
+def format_cpdb_results_for_viz(cpdb_results, separator='|'):
+    """Backward-compatible alias of :func:`format_cpdb_results`."""
+    return format_cpdb_results(cpdb_results, separator=separator)
 
 
 def create_cellchatviz_from_cpdb(cpdb_results, separator='|', palette=None):
@@ -755,7 +768,7 @@ def create_cellchatviz_from_cpdb(cpdb_results, separator='|', palette=None):
         Initialized visualization object.
     """
     # Format results
-    adata_cpdb = format_cpdb_results_for_viz(cpdb_results, separator=separator)
+    adata_cpdb = format_cpdb_results(cpdb_results, separator=separator)
     
     # Create and return CellChatViz object
     from ..pl._cpdbviz import CellChatViz
@@ -921,6 +934,8 @@ def run_cellphonedb_v5(adata,
                            cleanup_temp=True,
                            debug=False,
                            separator='|',
+                           results_key: str = 'cpdb_results',
+                           comm_key: str = 'cpdb_comm',
                            **kwargs):
     """
     Run CellPhoneDB statistical analysis with automatic database download
@@ -964,7 +979,10 @@ def run_cellphonedb_v5(adata,
     Returns
     -------
     Tuple[dict,anndata.AnnData]
-        Raw CellPhoneDB result dict and visualization-ready AnnData.
+        Raw CellPhoneDB result dict and visualization-ready communication
+        AnnData. The same objects are also written to
+        ``adata.uns[results_key]`` and ``adata.uns[comm_key]`` so downstream
+        ``ov.pl.ccc_*`` plots can work directly on the original ``adata``.
 
     Examples
     --------
@@ -1118,7 +1136,9 @@ def run_cellphonedb_v5(adata,
         # Step 7: Format results for visualization
         print("   - Formatting results for visualization...")
         
-        adata_cpdb = format_cpdb_results_for_viz(cpdb_results, separator=separator)
+        adata_cpdb = format_cpdb_results(cpdb_results, separator=separator)
+        adata.uns[results_key] = cpdb_results
+        adata.uns[comm_key] = adata_cpdb
         
         print(f"   - Created visualization AnnData: {adata_cpdb.shape}")
         print(f"   - Cell interactions: {adata_cpdb.n_obs}")

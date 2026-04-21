@@ -67,8 +67,10 @@ from ._cpdb import (
     cpdb_interaction_filtered,
     cpdb_submeans_exacted,cpdb_exact_target,
     cpdb_exact_source,cellphonedb_v5,
-    run_cellphonedb_v5
+    run_cellphonedb_v5, format_cpdb_results, format_cpdb_results_for_viz
 )
+from ._liana import run_liana, format_liana_results, format_liana_results_for_viz
+from ._comm import to_comm_adata, extract_comm_adata
 
 from ._scgsea import (
     geneset_aucell,pathway_aucell,pathway_aucell_enrichment,
@@ -302,6 +304,13 @@ __all__ = [
     'cpdb_exact_source',
     'cellphonedb_v5',
     'run_cellphonedb_v5',
+    'format_cpdb_results',
+    'format_cpdb_results_for_viz',
+    'run_liana',
+    'format_liana_results',
+    'format_liana_results_for_viz',
+    'to_comm_adata',
+    'extract_comm_adata',
     # Pathway and functional analysis
     'geneset_aucell',
     'pathway_aucell',

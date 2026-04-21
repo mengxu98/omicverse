@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import marsilea as ma
 import marsilea.plotter as mp
+import warnings
 from matplotlib.colors import Normalize, Colormap
 from matplotlib.axes import Axes as _AxesSubplot
 from anndata import AnnData
@@ -163,6 +164,15 @@ def dotplot(
         If `return_fig` is True, returns the figure object.
         If `show` is False, returns axes dictionary.
     """
+    marsilea_version = getattr(ma, "__version__", "")
+    if marsilea_version.startswith("0.5.6"):
+        warnings.warn(
+            "marsilea 0.5.6 has an upstream legend regression that can hide "
+            "the dotplot colorbar. Please upgrade marsilea to 0.5.7 or newer.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     # Convert var_names to list if string
     original_var_names_dict = None
     if isinstance(var_names, str):

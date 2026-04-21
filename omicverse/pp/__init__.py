@@ -73,6 +73,7 @@ from ._qc import qc,filter_cells,filter_genes
 from ._recover import recover_counts,binary_search
 from ._normalization import log1p,normalize_total
 from ._scrublet import scrublet, scrublet_simulate_doublets
+from ._champ import champ
 
 __all__ = [
     # Core preprocessing
@@ -109,6 +110,7 @@ __all__ = [
     # Doublet detection
     'scrublet',
     'scrublet_simulate_doublets',
+    'champ',
 
     # Utility functions
     'score_genes_cell_cycle',

@@ -50,6 +50,47 @@ def test_id_mapping_uses_mass_db_for_local_hits():
 
 
 @needs_network
+def test_id_mapping_chebi_column_alias():
+    """``map_ids(..., targets=('chebi',), mass_db=chebi_df)`` must resolve
+    the ChEBI identifier without falling through to PubChem. The ChEBI
+    DataFrame stores the ID as ``chebi_id``, not ``chebi``; a column
+    alias in map_ids bridges the gap. Without the alias every row
+    looked "missing chebi" and the fallback hit PubChem for every
+    name — the smoke test on MTBLS1 took ~30 s per MSEA call because
+    of this."""
+    import omicverse as ov
+
+    ch = ov.metabol.fetch_chebi_compounds()
+    sample = ch[ch["chebi_id"].astype(str).str.startswith("CHEBI:")].head(1).iloc[0]
+    result = ov.metabol.map_ids(
+        [sample["name"]], targets=("chebi",), mass_db=ch,
+    )
+    assert result.iloc[0]["chebi"] == sample["chebi_id"], (
+        f"Expected {sample['chebi_id']!r}, got {result.iloc[0]['chebi']!r}"
+    )
+
+
+@needs_network
+def test_msea_ora_accepts_mass_db(cachexia_adata):
+    """``msea_ora(..., mass_db=chebi_df)`` must produce the same
+    pathway set as the network-fallback path but without per-name
+    PubChem traffic — covers the MTBLS1 perf regression fix."""
+    import omicverse as ov
+    from omicverse.metabol import differential, msea_ora, normalize, transform
+
+    a = normalize(cachexia_adata, method="pqn")
+    a = transform(a, method="log")
+    deg = differential(a, method="welch_t", log_transformed=True)
+    hits = deg[deg["padj"] < 0.30].index.tolist()
+    background = deg.index.tolist()
+    ch = ov.metabol.fetch_chebi_compounds()
+    out = msea_ora(hits, background, min_size=3, mass_db=ch)
+    assert not out.empty
+    for col in ("pathway", "overlap", "set_size", "padj"):
+        assert col in out.columns
+
+
+@needs_network
 def test_msea_ora_finds_relevant_pathways_on_cachexia(cachexia_adata):
     """Cachexia urinary metabolites should be enriched for amino-acid /
     TCA pathways. Uses the full fetched KEGG database."""

@@ -75,6 +75,41 @@ class TestCvFilter:
         with pytest.raises(KeyError, match="no column"):
             cv_filter(adata, qc_mask="nonexistent", cv_threshold=0.30)
 
+    def test_across_all_no_qc_needed(self):
+        """cv_filter(across='all') works on studies without QC pools."""
+        from omicverse.metabol import cv_filter
+
+        # Feature 0 is stable (CV≈1%), feature 1 is wildly variable
+        # (CV well above 1). Threshold 0.5 keeps only the stable one.
+        rng = np.random.default_rng(0)
+        X = np.column_stack([
+            np.full(30, 100.0) + rng.normal(0, 1, 30),                # CV≈1%
+            np.concatenate([rng.uniform(1, 10, 15),
+                            rng.uniform(500, 1000, 15)]),             # CV≫1
+        ])
+        adata = _adata(X, obs_cols={"group": ["a", "b"] * 15},
+                       var_names=["stable", "noisy"])
+
+        out = cv_filter(adata, across="all", cv_threshold=0.5)
+        assert "stable" in out.var_names
+        assert "noisy" not in out.var_names
+        assert out.n_obs == adata.n_obs
+
+    def test_across_qc_without_mask_raises(self):
+        """Default across='qc' still requires qc_mask."""
+        from omicverse.metabol import cv_filter
+
+        adata = _adata(np.ones((5, 2)))
+        with pytest.raises(ValueError, match="requires a qc_mask"):
+            cv_filter(adata, cv_threshold=0.30)
+
+    def test_across_unknown_raises(self):
+        from omicverse.metabol import cv_filter
+
+        adata = _adata(np.ones((5, 2)))
+        with pytest.raises(ValueError, match="across must be"):
+            cv_filter(adata, across="samples", cv_threshold=0.5)
+
 
 # --------------------------------------------------------------------------- #
 # drift_correct

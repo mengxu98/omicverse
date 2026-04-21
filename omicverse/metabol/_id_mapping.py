@@ -88,14 +88,37 @@ def map_ids(
             normalize_name(n): i for i, n in enumerate(mass_db["name"])
         }
 
+    # Column-name aliases for the ChEBI DataFrame shipped by
+    # `fetch_chebi_compounds`: its ChEBI identifier column is named
+    # ``chebi_id``, but users ask for target ``"chebi"``. Without this
+    # alias every row is declared "missing chebi" -> we fall through
+    # to PubChem for every single name, which is a 30-second penalty
+    # on a typical MSEA background list of 200 metabolites.
+    _COLUMN_ALIAS = {
+        "chebi": ("chebi", "chebi_id"),
+        "pubchem": ("pubchem", "pubchem_cid"),
+        "lipidmaps": ("lipidmaps", "lipid_maps_id", "lipidmaps_id"),
+    }
+    mass_cols = set(mass_db.columns) if mass_db is not None else set()
+
+    def _column_for(target):
+        candidates = _COLUMN_ALIAS.get(target, (target,))
+        for c in candidates:
+            if c in mass_cols:
+                return c
+        return None
+
+    col_for_target = {t: _column_for(t) for t in targets}
+
     for name in names:
         row = {t: "" for t in targets}
         if idx_of_name is not None:
             hit = idx_of_name.get(normalize_name(name))
             if hit is not None:
                 for t in targets:
-                    if t in mass_db.columns:
-                        v = mass_db.iloc[hit][t]
+                    col = col_for_target[t]
+                    if col is not None:
+                        v = mass_db.iloc[hit][col]
                         if isinstance(v, str) and v:
                             row[t] = v
         # Fall back to PubChem per-name for anything still empty

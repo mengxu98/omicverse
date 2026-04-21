@@ -63,6 +63,7 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "combine_studies":      ("._meta", "combine_studies"),
     "meta_da":              ("._meta", "meta_da"),
     # paired microbe ↔ metabolite integration
+    "fetch_franzosa_ibd_2019": ("._pair", "fetch_franzosa_ibd_2019"),
     "simulate_paired":      ("._pair", "simulate_paired"),
     "paired_spearman":      ("._pair", "paired_spearman"),
     "paired_cca":           ("._pair", "paired_cca"),

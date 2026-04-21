@@ -6,6 +6,17 @@ import pandas as pd
 import pytest
 
 
+def _has_franzosa_cache() -> bool:
+    import os
+    for n in ("genera.tsv", "mtb.tsv", "metadata.tsv"):
+        if not os.path.exists(os.path.join(
+            "/scratch/users/steorra/analysis/omicverse_dev/cache/franzosa_2019",
+            n,
+        )):
+            return False
+    return True
+
+
 def _torch_available() -> bool:
     try:
         import torch  # noqa: F401
@@ -17,6 +28,16 @@ def _torch_available() -> bool:
 requires_torch = pytest.mark.skipif(
     not _torch_available(),
     reason="torch not installed (install the [tests] extra)",
+)
+
+# Network-fetching tests are opt-in: set OMICVERSE_NET_TESTS=1 to run, or
+# drop the cached TSVs under the hard-coded scratch path used by the
+# microbiome tutorial. CI / reviewers can skip.
+import os as _os
+requires_franzosa = pytest.mark.skipif(
+    not (_os.environ.get("OMICVERSE_NET_TESTS") == "1" or _has_franzosa_cache()),
+    reason="fetch_franzosa_ibd_2019 test needs either a cached copy or "
+           "OMICVERSE_NET_TESTS=1 to actually download (~30 MB).",
 )
 
 
@@ -182,6 +203,45 @@ def test_plot_cooccurrence_returns_axes():
     )
     ax = plot_cooccurrence(df, top_n=None)
     assert ax is not None
+
+
+# ---------------------------------------------------------------------------
+# fetch_franzosa_ibd_2019 — opt-in; runs only against a cached copy or when
+# the tester sets OMICVERSE_NET_TESTS=1.
+# ---------------------------------------------------------------------------
+
+
+@requires_franzosa
+def test_fetch_franzosa_ibd_2019_shape_and_alignment(tmp_path):
+    """Validate the curated Franzosa 2019 fetcher: shapes, aligned obs,
+    parsed taxonomy/annotation columns, three-arm cohort split."""
+    import os
+    from omicverse.micro import fetch_franzosa_ibd_2019
+
+    cache = "/scratch/users/steorra/analysis/omicverse_dev/cache/franzosa_2019"
+    data_dir = cache if _has_franzosa_cache() else str(tmp_path)
+    mb, mt = fetch_franzosa_ibd_2019(data_dir=data_dir)
+
+    assert mb.shape == (220, 11720)
+    assert mt.shape == (220, 8848)
+    assert list(mb.obs_names) == list(mt.obs_names)
+
+    # microbe var: parsed GTDB taxonomy + full-string fallback
+    for col in ("domain", "phylum", "class", "order",
+                "family", "genus", "species", "taxonomy"):
+        assert col in mb.var.columns, col
+
+    # metabolite var: cluster id + name
+    assert "cluster" in mt.var.columns and "name" in mt.var.columns
+    assert mt.var["name"].notna().sum() > 0
+
+    # Three-arm cohort: CD / UC / Control
+    assert set(mb.obs["Study.Group"].unique()) == {"CD", "UC", "Control"}
+
+    # Default microbe_count_scale=1e6 → integer pseudo-counts summing near 1M
+    sums = np.asarray(mb.X).sum(axis=1)
+    assert np.issubdtype(mb.X.dtype, np.integer)
+    assert 9e5 < float(sums.mean()) < 1.1e6
 
 
 def test_plot_method_comparison_requires_at_least_one_method():

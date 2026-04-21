@@ -58,6 +58,178 @@ def _check_paired(adata_mb: "ad.AnnData", adata_mt: "ad.AnnData") -> None:
 
 
 # ---------------------------------------------------------------------------
+# fetch_franzosa_ibd_2019 — curated real paired 16S + LC-MS dataset
+# ---------------------------------------------------------------------------
+
+
+_FRANZOSA_2019_BASE = (
+    "https://raw.githubusercontent.com/borenstein-lab/"
+    "microbiome-metabolome-curated-data/main/data/processed_data/"
+    "FRANZOSA_IBD_2019"
+)
+_FRANZOSA_2019_FILES = ("genera.tsv", "mtb.tsv", "metadata.tsv")
+
+
+@register_function(
+    aliases=[
+        "fetch_franzosa_ibd_2019", "fetch_franzosa_2019",
+        "franzosa_2019_ibd_paired",
+    ],
+    category="microbiome",
+    description="Download and parse the Franzosa 2019 IBD paired 16S + LC-MS metabolomics dataset (PRISM cohort, 220 samples, 88 CD / 76 UC / 56 Control).",
+    examples=[
+        "mb, mt = ov.micro.fetch_franzosa_ibd_2019('/scratch/data/franzosa_2019')",
+    ],
+    related=["micro.paired_spearman", "micro.paired_cca", "micro.MMvec"],
+)
+def fetch_franzosa_ibd_2019(
+    data_dir: str,
+    overwrite: bool = False,
+    microbe_count_scale: float = 1e6,
+) -> Tuple["ad.AnnData", "ad.AnnData"]:
+    """Download + parse the Franzosa *et al.* 2019 paired IBD dataset.
+
+    Files are fetched from the Borenstein lab's curated
+    ``microbiome-metabolome-curated-data`` GitHub repository — three
+    TSVs (genera.tsv, mtb.tsv, metadata.tsv) totalling about 30 MB.
+    Once the files exist in ``data_dir`` the function is offline.
+
+    Parameters
+    ----------
+    data_dir
+        Absolute path the three TSVs are cached under. No ``$HOME``
+        fallback — you pick where it goes (recommended: a scratch
+        directory).
+    overwrite
+        Re-download even if the files already exist.
+    microbe_count_scale
+        The Borenstein TSV delivers per-sample *relative abundances*.
+        To make the tables look like familiar 16S count matrices
+        (integer counts, range 10⁰–10⁵) we multiply by this scale and
+        round — a pseudo-count-per-million by default. Pass 1.0 to
+        keep proportions (most useful if you plan to CLR-transform
+        immediately and don't need integer counts). All downstream
+        ov.micro APIs (``filter_by_prevalence``, ``paired_spearman``,
+        ``paired_cca``, ``MMvec``) work on either, but ``min_count``
+        filters expect counts ≥ 1.
+
+    Returns
+    -------
+    ``(adata_microbe, adata_metabolite)`` — two AnnDatas sharing
+    ``obs_names`` (same 220 samples, same order). The microbe ``var``
+    carries parsed GTDB 7-rank taxonomy (``domain / phylum / class /
+    order / family / genus / species`` + the raw GTDB string as
+    ``taxonomy``). The metabolite ``var`` carries the cluster ID and,
+    where annotated, the HMDB name (``name`` column; ``NaN`` for
+    unannotated clusters). Both ``obs`` frames carry the same cohort
+    metadata from metadata.tsv (``Study.Group`` = CD / UC / Control,
+    ``Subject``, ``Age``, ``Fecal.Calprotectin``, drug covariates).
+    """
+    import os
+    from urllib.request import urlretrieve
+
+    data_dir = os.path.abspath(data_dir)
+    os.makedirs(data_dir, exist_ok=True)
+
+    paths: Dict[str, str] = {}
+    for name in _FRANZOSA_2019_FILES:
+        p = os.path.join(data_dir, name)
+        if overwrite or not os.path.exists(p) or os.path.getsize(p) == 0:
+            url = f"{_FRANZOSA_2019_BASE}/{name}"
+            urlretrieve(url, p)
+        paths[name] = p
+
+    meta = pd.read_csv(paths["metadata.tsv"], sep="\t")
+    meta.index = meta["Sample"].astype(str)
+
+    df_mb = pd.read_csv(paths["genera.tsv"], sep="\t")
+    df_mb.index = df_mb["Sample"].astype(str)
+    df_mb = df_mb.drop(columns=["Sample"])
+
+    df_mt = pd.read_csv(paths["mtb.tsv"], sep="\t")
+    df_mt.index = df_mt["Sample"].astype(str)
+    df_mt = df_mt.drop(columns=["Sample"])
+
+    # Align all three on the intersection of samples, preserving metadata order.
+    samples = [s for s in meta.index if s in df_mb.index and s in df_mt.index]
+    meta  = meta.loc[samples]
+    df_mb = df_mb.loc[samples]
+    df_mt = df_mt.loc[samples]
+
+    var_mb = _parse_gtdb_taxonomy(df_mb.columns)
+    var_mt = _parse_metabolite_annotations(df_mt.columns)
+
+    # Relabel columns so var_names = taxonomy tail / cluster id (short + unique).
+    df_mb.columns = var_mb.index
+    df_mt.columns = var_mt.index
+
+    mb_X = df_mb.values.astype(np.float64)
+    if microbe_count_scale and microbe_count_scale != 1.0:
+        mb_X = np.rint(mb_X * float(microbe_count_scale)).astype(np.int64)
+    adata_mb = ad.AnnData(X=mb_X, obs=meta.copy(), var=var_mb)
+    adata_mt = ad.AnnData(X=df_mt.values.astype(np.float64),
+                          obs=meta.copy(), var=var_mt)
+    return adata_mb, adata_mt
+
+
+_GTDB_RANKS = ("domain", "phylum", "class", "order", "family", "genus", "species")
+
+
+def _parse_gtdb_taxonomy(columns) -> pd.DataFrame:
+    """Parse ``d__X;p__Y;c__Z;…`` strings into a (n_features × 8) DataFrame."""
+    rows: List[Dict[str, str]] = []
+    for col in columns:
+        parts = str(col).split(";")
+        rank_map = {r: "" for r in _GTDB_RANKS}
+        for p in parts:
+            for prefix, rank in zip(
+                ("d__", "p__", "c__", "o__", "f__", "g__", "s__"),
+                _GTDB_RANKS,
+            ):
+                if p.startswith(prefix):
+                    rank_map[rank] = p[len(prefix):]
+                    break
+        rank_map["taxonomy"] = str(col)
+        rows.append(rank_map)
+    var = pd.DataFrame(rows)
+
+    # Build a short, unique var_name: prefer genus, fall back to first
+    # non-empty rank, suffix a counter if duplicates exist.
+    short: List[str] = []
+    seen: Dict[str, int] = {}
+    for i, row in var.iterrows():
+        base = row["genus"] or row["family"] or row["order"] or row["class"] \
+               or row["phylum"] or row["domain"] or f"tax_{i}"
+        if base in seen:
+            seen[base] += 1
+            base = f"{base}_{seen[base]}"
+        else:
+            seen[base] = 0
+        short.append(base)
+    var.index = pd.Index(short, name="feature")
+    return var
+
+
+def _parse_metabolite_annotations(columns) -> pd.DataFrame:
+    """Split ``C18-neg_Cluster_0004: 4-hydroxystyrene`` → (cluster, name)."""
+    rows: List[Dict[str, Any]] = []
+    for col in columns:
+        s = str(col)
+        if ":" in s:
+            cluster, name = s.split(":", 1)
+            cluster = cluster.strip()
+            name = name.strip()
+            if name.upper() in {"NA", "N/A", ""}:
+                name = np.nan
+        else:
+            cluster, name = s.strip(), np.nan
+        rows.append({"cluster": cluster, "name": name, "raw": s})
+    var = pd.DataFrame(rows)
+    var.index = pd.Index(var["cluster"], name="feature")
+    return var
+
+
+# ---------------------------------------------------------------------------
 # simulate_paired — synthetic data for the tutorial + the tests
 # ---------------------------------------------------------------------------
 

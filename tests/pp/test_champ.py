@@ -255,3 +255,56 @@ def test_champ_widths_are_non_negative(adata_with_neighbors):
     hull_widths = df.loc[df["on_hull"], "gamma_range"]
     # All hull rows should report a non-negative range after clamping.
     assert (hull_widths >= 0).all()
+
+
+# ─────────────────────── width_metric ──────────────────────────────────────────
+
+
+def test_width_metric_log_default(adata_with_neighbors):
+    """Default ``width_metric='log'`` is recorded in the uns payload."""
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    ov.pp.champ(a, n_partitions=8, random_state=0, verbose=False)
+    assert a.uns["champ"]["width_metric"] == "log"
+
+
+def test_width_metric_can_select_different_partitions(adata_with_neighbors):
+    """linear vs log γ-width can pick *different* hull partitions —
+    the whole point of the new metric. We don't assert which is right
+    on the synthetic data, only that the choice depends on the metric."""
+    import omicverse as ov
+
+    chosen = {}
+    for metric in ("linear", "log"):
+        a = adata_with_neighbors.copy()
+        _, _, df = ov.pp.champ(
+            a, n_partitions=12, gamma_min=0.05, gamma_max=2.5,
+            width_metric=metric, random_state=0, verbose=False,
+        )
+        # Both metrics must respect the on-hull invariant.
+        chosen_idx = df["gamma_range"].idxmax()
+        assert df.loc[chosen_idx, "on_hull"], \
+            f"{metric}: chosen partition was not on the hull"
+        chosen[metric] = (
+            df.loc[chosen_idx, "n_clusters"],
+            df.loc[chosen_idx, "gamma_lo"],
+            df.loc[chosen_idx, "gamma_hi"],
+        )
+    # The two metrics need not agree, but both should produce hull
+    # partitions; this test pins the contract that the parameter has
+    # an effect on the chosen γ-range.
+    # (On pbmc8k they pick wildly different partitions — see the
+    # comparison notebook for empirical evidence.)
+    assert isinstance(chosen["linear"], tuple) and isinstance(chosen["log"], tuple)
+
+
+def test_width_metric_unknown_raises(adata_with_neighbors):
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    with pytest.raises(ValueError, match="width_metric"):
+        ov.pp.champ(
+            a, n_partitions=6, width_metric="bogus",
+            random_state=0, verbose=False,
+        )

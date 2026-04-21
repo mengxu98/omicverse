@@ -159,6 +159,7 @@ def champ(
     n_partitions: int = 30,
     gamma_min: float = 0.05,
     gamma_max: float = 3.0,
+    width_metric: str = 'log',
     key_added: str = 'champ',
     random_state: int = 0,
     verbose: bool = True,
@@ -211,6 +212,29 @@ def champ(
     gamma_min, gamma_max
         Endpoints of the γ scan; ``gamma_max`` also caps the leftmost
         hull partition's "open" admissible range so widths are finite.
+    width_metric
+        How "widest admissible γ-range" is measured when picking the
+        chosen partition. Choices:
+
+        - ``'log'`` (**default**, omicverse): multiplicative width
+          :math:`\log(\gamma_{hi}/\gamma_{lo})`. Modularity is invariant
+          under :math:`\gamma \mapsto c\gamma` (the optimal partition at
+          each γ doesn't change), so γ has no natural additive scale —
+          the canonical "width" on a scale-free axis is multiplicative.
+          Matters in practice because additive width systematically
+          over-rewards fine partitions: small differences in
+          :math:`b` between fine partitions get amplified into large
+          additive γ-ranges by the small denominator in the crossover
+          formula :math:`\gamma = \Delta a / \Delta b`. The log metric
+          undoes this geometric bias.
+        - ``'linear'`` (Weir et al. 2017 canonical): additive width
+          :math:`\gamma_{hi} - \gamma_{lo}`. Reproduces the original
+          paper's behaviour. Tends to over-cluster on data with wide
+          high-γ plateaus (typical for scRNA).
+        - ``'relative'``: :math:`(\gamma_{hi}-\gamma_{lo}) /
+          \overline{\gamma}` where :math:`\overline{\gamma}` is the
+          midpoint. Closely related to log width; included for
+          completeness.
     key_added
         ``adata.obs`` column to write the chosen partition's labels to.
     random_state
@@ -350,11 +374,28 @@ def champ(
         gamma_lo[hi_pos] = max(0.0, lo)
         gamma_hi[hi_pos] = min(gamma_max, hi)
 
-    # 6. Pick the widest range. Clamp negative widths (hull partitions
-    # whose admissible region extends beyond gamma_max get 0, not a
-    # confusing negative number) and exclude non-hull rows from the
-    # argmax via -inf.
-    raw_widths = gamma_hi - gamma_lo
+    # 6. Pick the widest range under the chosen metric. Clamp negative
+    # widths to zero (a hull partition whose admissible region extends
+    # beyond [0, gamma_max] gets 0, not a confusing negative number)
+    # and exclude non-hull rows from the argmax via -inf.
+    if width_metric == 'linear':
+        raw_widths = gamma_hi - gamma_lo
+    elif width_metric == 'log':
+        # γ-space is scale-free → multiplicative width. Clamp γ_lo at
+        # gamma_min to avoid log(0) for the rightmost hull partition
+        # (whose γ_lo we set to 0 by convention).
+        lo_clamped = np.maximum(gamma_lo, gamma_min)
+        hi_clamped = np.maximum(gamma_hi, lo_clamped)
+        raw_widths = np.log(hi_clamped) - np.log(lo_clamped)
+    elif width_metric == 'relative':
+        midpoint = (gamma_hi + gamma_lo) / 2.0
+        midpoint = np.maximum(midpoint, gamma_min)
+        raw_widths = (gamma_hi - gamma_lo) / midpoint
+    else:
+        raise ValueError(
+            f"width_metric must be 'log' (default), 'linear', or "
+            f"'relative'; got {width_metric!r}."
+        )
     widths = np.where(on_hull,
                        np.maximum(raw_widths, 0.0),
                        np.full(len(partitions), -np.inf))
@@ -390,6 +431,7 @@ def champ(
         'chosen_gamma_width':    best_hi - best_lo,
         'gamma_min':             float(gamma_min),
         'gamma_max':             float(gamma_max),
+        'width_metric':          width_metric,
     }
     add_reference(
         adata, key_added,

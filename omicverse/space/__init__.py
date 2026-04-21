@@ -64,6 +64,7 @@ from ._cast import CAST
 from ._cellcharter import cellcharter
 from ._tools import *
 from ._commot import create_communication_anndata,update_classification_from_database
+from ._tissue_zones import nmf_tissue_zones, TissueZones
 from ._deconvolution import Deconvolution,calculate_gene_signature
 
 _TORCH_DEPS = ("torch", "torch_geometric")

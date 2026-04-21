@@ -188,12 +188,16 @@ def auto_resolution(
     adata: anndata.AnnData,
     resolutions: Optional[Sequence[float]] = None,
     *,
+    method: str = 'bootstrap-ari',
     n_subsamples: int = 5,
     subsample_frac: float = 0.8,
     use_null_correction: bool = True,
     n_null_subsamples: int = 3,
     null_seed: int = 42,
     null_layer: Optional[str] = None,
+    gamma_min: float = 0.05,
+    gamma_max: float = 3.0,
+    n_partitions: int = 30,
     min_clusters: int = 3,
     key_added: str = 'leiden',
     random_state: int = 0,
@@ -294,7 +298,56 @@ def auto_resolution(
     ----------
     Lange, Roth, Braun, Buhmann. "Stability-based validation of
     clustering solutions." *Neural Computation* 16(6):1299–1323, 2004.
+
+    Weir, Emmons, Wakefield, Hopkins, Mucha. "Post-processing partitions
+    to identify domains of modularity optimization." *Algorithms* 10(3):93,
+    2017 (used when ``method='champ'``).
     """
+    # ── Route: method='champ' → deterministic modularity-geometric ──
+    if method == 'champ':
+        # Nested @tracked call — champ's own record_step is silenced
+        # by the depth guard, so the entry will be owned by
+        # auto_resolution and reflect that we used CHAMP.
+        from ..pp._champ import champ as _champ
+        result_adata, (gamma_lo, gamma_hi), df_champ = _champ(
+            adata,
+            resolutions=resolutions,
+            n_partitions=n_partitions,
+            gamma_min=gamma_min,
+            gamma_max=gamma_max,
+            key_added=key_added,
+            random_state=random_state,
+            verbose=verbose,
+        )
+        # Return the winning partition's origin_resolution as the
+        # scalar ``best`` — the γ you'd plug into plain leiden to get
+        # this same partition. The admissible range lives in
+        # ``adata.uns[key_added]['chosen_gamma_range']``.
+        widest = df_champ.loc[df_champ['gamma_range'].idxmax()]
+        best_resolution = float(widest['origin_resolution'])
+        note(
+            backend=f'auto_resolution · CHAMP · '
+                     f'γ ∈ [{gamma_lo:.3f}, {gamma_hi:.3f}] '
+                     f'(width {gamma_hi - gamma_lo:.3f})',
+            viz=[
+                {'function': 'ov.pl.champ_landscape', 'kwargs': {}},
+                {'function': 'ov.pl.cluster_sizes_bar',
+                  'kwargs': {'groupby': key_added}},
+                *([{'function': 'ov.pl.embedding',
+                     'kwargs': {'basis': 'X_umap',
+                                'color': key_added,
+                                'frameon': 'small'}}]
+                   if 'X_umap' in adata.obsm else []),
+            ],
+        )
+        return result_adata, best_resolution, df_champ
+    if method != 'bootstrap-ari':
+        raise ValueError(
+            f"method must be 'bootstrap-ari' (Lange 2004, default) or "
+            f"'champ' (Weir 2017); got {method!r}."
+        )
+
+    # ── Default path: method='bootstrap-ari' ────────────────────────
     n_obs = adata.n_obs
     if n_obs < 50:
         raise ValueError(

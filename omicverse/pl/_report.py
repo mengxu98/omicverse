@@ -308,6 +308,111 @@ def highly_variable_genes_scatter(
     return ax
 
 
+def champ_landscape(
+    adata=None,
+    *,
+    partitions=None,
+    best: Optional[float] = None,
+    ax: Optional[plt.Axes] = None,
+    figsize: tuple[float, float] = (6.4, 4.5),
+    title: str = "CHAMP: modularity landscape (b, a)",
+    show: Optional[bool] = None,
+    return_fig: bool = False,
+):
+    """Scatter of CHAMP's ``(b, a)`` modularity-landscape points.
+
+    For any fixed partition :math:`P`, Newman modularity is linear in
+    the resolution parameter: :math:`Q(\\gamma; P) = a_P - \\gamma b_P`.
+    CHAMP picks the partition whose line lies on the upper envelope of
+    all candidates across the widest :math:`\\gamma`-range. Geometrically
+    in the :math:`(b, a)` plane that is the upper convex hull; this
+    plot shows all candidate partitions, marks the hull points, and
+    highlights the chosen one.
+
+    Without arguments, reads the partitions DataFrame stored at
+    ``adata.uns['<champ-key>']['partitions']`` (default uns key is
+    ``'champ'``; see :func:`omicverse.pp.champ`'s ``key_added``)::
+
+        ov.pp.champ(adata)
+        ov.pl.champ_landscape(adata)
+
+    Parameters
+    ----------
+    adata
+        AnnData on which :func:`omicverse.pp.champ` has been run.
+    partitions
+        Optional explicit partitions table — either the DataFrame
+        returned as the third element of ``champ``'s return tuple, or
+        the ``adata.uns['champ']['partitions']`` dict. Overrides the
+        ``uns`` lookup.
+    best
+        Resolution value to highlight. If ``None``, the row in
+        ``partitions`` with the largest ``gamma_range`` on the hull is
+        used.
+    """
+    import pandas as pd
+
+    if partitions is None:
+        if adata is None:
+            raise ValueError(
+                "champ_landscape needs either an AnnData with "
+                "`adata.uns['champ']` (produced by ov.pp.champ) or an "
+                "explicit `partitions` table."
+            )
+        # Search uns for a champ-style payload.
+        payload = None
+        for key, v in (adata.uns or {}).items():
+            if (isinstance(v, dict) and "partitions" in v
+                    and "method" in v and "CHAMP" in str(v["method"])):
+                payload = v
+                break
+        if payload is None:
+            raise ValueError(
+                "No CHAMP result found in adata.uns — run ov.pp.champ "
+                "first, or pass `partitions` explicitly."
+            )
+        partitions = payload["partitions"]
+
+    df = (pd.DataFrame(partitions) if isinstance(partitions, dict)
+          else partitions.copy() if hasattr(partitions, "copy")
+          else pd.DataFrame(partitions))
+
+    created = ax is None
+    fig = ax.figure if ax is not None else plt.figure(figsize=figsize)
+    if ax is None:
+        ax = fig.add_subplot(111)
+
+    non_hull = df[~df["on_hull"]] if "on_hull" in df.columns else df.iloc[:0]
+    hull = (df[df["on_hull"]].sort_values("b")
+             if "on_hull" in df.columns else df.sort_values("b"))
+    ax.scatter(non_hull["b"], non_hull["a"], s=18, c="#B7B1A4",
+                alpha=0.6, linewidths=0, label="dominated")
+    ax.plot(hull["b"], hull["a"], "-o", color=sc_color[0],
+            lw=1.4, markersize=6, label="hull (admissible)")
+    # Star the chosen one.
+    chosen_idx = None
+    if "gamma_range" in df.columns and "on_hull" in df.columns:
+        hull_only = df[df["on_hull"]]
+        if len(hull_only) > 0:
+            chosen_idx = hull_only["gamma_range"].idxmax()
+    if chosen_idx is not None:
+        row = df.loc[chosen_idx]
+        ax.scatter(row["b"], row["a"], s=220, marker="*",
+                    color=sc_color[10], zorder=5,
+                    label=f"chosen ({int(row['n_clusters'])} clusters)")
+
+    ax.set_xlabel("b  (within-cluster degree² / (2m)²)")
+    ax.set_ylabel("a  (within-cluster edge weight / 2m)")
+    ax.set_title(title)
+    ax.legend(loc="best", frameon=False, fontsize=9)
+
+    if show:
+        plt.show()
+    if created and return_fig:
+        return fig
+    return ax
+
+
 def neighbor_degree_histogram(
     adata,
     *,

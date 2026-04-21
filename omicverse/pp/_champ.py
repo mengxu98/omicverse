@@ -58,36 +58,64 @@ from ..report._provenance import tracked, note
 # ────────────────────── modularity coefficients ───────────────────────────────
 
 
-def _modularity_coefficients(W, labels) -> tuple[float, float]:
-    """Return ``(a, b)`` such that Newman modularity
+def _modularity_coefficients(W, labels, modularity: str = 'newman'
+                              ) -> tuple[float, float]:
+    """Return ``(a, b)`` such that the chosen modularity is
     :math:`Q(\\gamma; P) = a - \\gamma\\,b`.
 
-    Works for any non-negative weighted symmetric adjacency matrix
-    (sparse or dense). For undirected graphs the convention used here
-    is ``2m = W.sum()`` (each edge counted twice in the symmetric
-    matrix).
+    Two flavours, both linear in γ:
 
-    Linear in ``nnz(W)``: iterates the COO entries once for ``a`` and
-    does a single scatter-add over labels for ``b``.
+    - ``'newman'`` — Newman-Girvan modularity:
+
+      .. math::
+
+          Q = \\frac{1}{2m}\\sum_{ij}\\bigl[A_{ij}
+                  - \\gamma\\,\\frac{d_i d_j}{2m}\\bigr]\\delta(c_i, c_j)
+
+      with ``a = within-cluster edge weight / 2m`` and
+      ``b = Σ_c (Σ_{i in c} d_i)² / (2m)²``.
+
+    - ``'cpm'`` — Constant Potts Model (Reichardt-Bornholdt 2006), which
+      is **resolution-limit-free** (Fortunato & Barthelemy 2007):
+
+      .. math::
+
+          Q = \\sum_{ij}\\bigl[A_{ij} - \\gamma\\bigr]\\,\\delta(c_i, c_j)
+
+      with ``a = within-cluster edge weight / W_total`` and
+      ``b = Σ_c |c|² / N²``. Same normalisation pattern as Newman so
+      γ is on a comparable order of magnitude.
+
+    Linear in ``nnz(W)`` regardless of flavour: a single COO sweep
+    plus a scatter-add over labels.
     """
     if not sp.issparse(W):
         W = sp.csr_matrix(W)
     coo = W.tocoo()
-    total = float(W.sum())  # 2m
+    total = float(W.sum())  # 2m for undirected
     if total <= 0:
         return 0.0, 0.0
-    d = np.asarray(W.sum(axis=1)).ravel()
 
-    # a = (1/2m) * within-cluster edge weight
+    # a = within-cluster edge weight / total (same for both flavours).
     same = labels[coo.row] == labels[coo.col]
     a = float(coo.data[same].sum()) / total
 
-    # b = (1/(2m)^2) * Σ_c (Σ_{i in c} d_i)^2.
-    # np.bincount(weights=...) is the fast, buffered scatter-add —
-    # materially quicker than np.add.at for large n.
+    # b depends on the modularity flavour.
     unique_labels, inv = np.unique(labels, return_inverse=True)
-    D = np.bincount(inv, weights=d, minlength=len(unique_labels))
-    b = float(np.sum(D * D)) / (total * total)
+    if modularity == 'newman':
+        d = np.asarray(W.sum(axis=1)).ravel()
+        D = np.bincount(inv, weights=d, minlength=len(unique_labels))
+        b = float(np.sum(D * D)) / (total * total)
+    elif modularity == 'cpm':
+        # b_CPM = Σ_c |c|² / N²
+        n = float(W.shape[0])
+        sizes = np.bincount(inv, minlength=len(unique_labels))
+        b = float(np.sum(sizes * sizes)) / (n * n)
+    else:
+        raise ValueError(
+            f"modularity must be 'newman' (default) or 'cpm'; "
+            f"got {modularity!r}."
+        )
     return a, b
 
 
@@ -159,7 +187,12 @@ def champ(
     n_partitions: int = 30,
     gamma_min: float = 0.05,
     gamma_max: float = 3.0,
+    n_seeds: int = 1,
+    modularity: str = 'newman',
     width_metric: str = 'log',
+    adaptive: bool = False,
+    adaptive_max_iter: int = 3,
+    adaptive_n_refine: int = 3,
     key_added: str = 'champ',
     random_state: int = 0,
     verbose: bool = True,
@@ -212,6 +245,23 @@ def champ(
     gamma_min, gamma_max
         Endpoints of the γ scan; ``gamma_max`` also caps the leftmost
         hull partition's "open" admissible range so widths are finite.
+    n_seeds
+        Number of random seeds to try at *each* γ. Leiden is heuristic
+        and converges to a local modularity maximum; running multiple
+        seeds at the same γ can surface different partitions and gives
+        CHAMP a denser candidate cloud to find the true upper hull on.
+        Default 1; the original Weir et al. 2017 paper recommends 3-5.
+        Cost scales linearly: ``n_seeds × n_partitions`` leiden calls.
+    modularity
+        ``'newman'`` (default) — Newman-Girvan modularity. ``'cpm'`` —
+        Constant Potts Model (Reichardt-Bornholdt 2006), which is
+        **resolution-limit-free** in the sense of Fortunato &
+        Barthelemy 2007. Both have the same linear-in-γ structure;
+        ``'cpm'`` writes ``b_P = Σ_c |c|² / N²`` instead of degree
+        squared, so γ-units differ — narrower γ ranges typically work.
+        For ``'cpm'`` the candidate generator passes
+        ``partition_type=leidenalg.CPMVertexPartition`` to leiden so
+        that candidates and scoring share an objective.
     width_metric
         How "widest admissible γ-range" is measured when picking the
         chosen partition. Choices:
@@ -235,6 +285,20 @@ def champ(
           \overline{\gamma}` where :math:`\overline{\gamma}` is the
           midpoint. Closely related to log width; included for
           completeness.
+    adaptive
+        If ``True``, iteratively refine the γ-grid around the current
+        hull's crossovers (active-set style): build the hull → for
+        each crossover sample :paramref:`adaptive_n_refine` extra γ
+        values nearby → re-run leiden → recompute the hull → repeat
+        until no new hull vertex appears or
+        :paramref:`adaptive_max_iter` iterations are reached. Catches
+        hull partitions that uniform γ-sampling misses around sharp
+        transitions.
+    adaptive_max_iter
+        Cap on the adaptive-refinement outer loop. Default 3.
+    adaptive_n_refine
+        Number of extra γ values sampled around each crossover per
+        adaptive iteration. Default 3.
     key_added
         ``adata.obs`` column to write the chosen partition's labels to.
     random_state
@@ -279,43 +343,122 @@ def champ(
             f"{len(resolutions)} (after deduplication)."
         )
 
+    if modularity not in ('newman', 'cpm'):
+        raise ValueError(
+            f"modularity must be 'newman' or 'cpm'; got {modularity!r}."
+        )
+    if n_seeds < 1:
+        raise ValueError(f"n_seeds must be >= 1; got {n_seeds}.")
     if verbose:
         print(f"{EMOJI['start']} CHAMP: scanning {len(resolutions)} "
-               f"resolutions ∈ [{gamma_min:.2f}, {gamma_max:.2f}]")
+               f"resolutions × {n_seeds} seed(s)"
+               f" ∈ [{gamma_min:.2f}, {gamma_max:.2f}]"
+               f" ({modularity} modularity, {width_metric} width)")
 
-    # 1. Generate candidate partitions, deduplicating identical ones.
-    # Each leiden invocation is intentionally silenced (we run leiden
-    # ~n_partitions times and its @monitor per-call SUMMARY boxes would
-    # drown out CHAMP's own progress). The outer `verbose` flag still
-    # controls CHAMP's own top-level messages.
+    # ── Candidate-generation helper: appends NEW unique partitions
+    # found at each (γ, seed) combo. Idempotent across calls (uses the
+    # shared seen_signatures dict). Used both for the initial scan and
+    # for adaptive refinement passes.
     from ..pp import leiden as _leiden  # tracked; nesting guard silences
 
     TMP_KEY = '_champ_tmp'
-    # Save any pre-existing user column at TMP_KEY so our scratch slot
-    # doesn't silently overwrite it.
     _preexisting_tmp = (adata.obs[TMP_KEY].copy()
                          if TMP_KEY in adata.obs.columns else None)
+    leiden_kwargs: dict = {}
+    if modularity == 'cpm':
+        try:
+            import leidenalg
+            leiden_kwargs['partition_type'] = leidenalg.CPMVertexPartition
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "modularity='cpm' requires `leidenalg` so the candidate "
+                "partitions match the CPM scoring; install via "
+                "`pip install leidenalg`."
+            ) from exc
+
+    def _generate(resolutions_to_try, partitions, seen_signatures):
+        """Run leiden at each (γ, seed) combo, append unique partitions
+        to ``partitions`` (in place)."""
+        for r in resolutions_to_try:
+            for s in range(n_seeds):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _leiden(adata, resolution=float(r),
+                             key_added=TMP_KEY,
+                             random_state=int(random_state + s),
+                             **leiden_kwargs)
+                labels = np.ascontiguousarray(
+                    adata.obs[TMP_KEY].astype(np.int32).values
+                )
+                sig = labels.tobytes()
+                if sig in seen_signatures:
+                    continue
+                seen_signatures[sig] = len(partitions)
+                partitions.append({
+                    'origin_resolution': float(r),
+                    'origin_seed':       int(random_state + s),
+                    'labels':            labels,
+                    'n_clusters':        int(np.unique(labels).size),
+                })
 
     partitions: list[dict] = []
     seen_signatures: dict[bytes, int] = {}
-    for r in resolutions:
-        with contextlib.redirect_stdout(io.StringIO()):
-            _leiden(adata, resolution=r, key_added=TMP_KEY,
-                    random_state=random_state)
-        labels = np.ascontiguousarray(
-            adata.obs[TMP_KEY].astype(np.int32).values
-        )
-        # tobytes() is ~50× faster than tuple(labels.tolist()) for
-        # large n and gives the same uniqueness guarantee.
-        sig = labels.tobytes()
-        if sig in seen_signatures:
-            continue
-        seen_signatures[sig] = len(partitions)
-        partitions.append({
-            'origin_resolution': r,
-            'labels': labels,
-            'n_clusters': int(np.unique(labels).size),
-        })
+    _generate(resolutions, partitions, seen_signatures)
+    if verbose:
+        print(f"  initial: {len(partitions)} unique partitions "
+               f"({len(resolutions) * n_seeds} leiden calls)")
+
+    # 2. Compute (a, b) per modularity flavour.
+    W = adata.obsp['connectivities']
+
+    def _compute_ab(start: int = 0):
+        for i in range(start, len(partitions)):
+            p = partitions[i]
+            a, b = _modularity_coefficients(W, p['labels'],
+                                              modularity=modularity)
+            p['a'] = a
+            p['b'] = b
+
+    _compute_ab()
+    a_vals = np.array([p['a'] for p in partitions])
+    b_vals = np.array([p['b'] for p in partitions])
+
+    # 2b. Adaptive refinement (active-set on the hull).
+    if adaptive:
+        delta = (gamma_max - gamma_min) / max(2 * len(resolutions), 4)
+        for it in range(adaptive_max_iter):
+            hull_idx_iter = _upper_hull_indices(b_vals, a_vals)
+            # Crossovers between consecutive hull partitions.
+            cross = []
+            for k in range(len(hull_idx_iter) - 1):
+                i, j = hull_idx_iter[k], hull_idx_iter[k + 1]
+                denom = b_vals[j] - b_vals[i]
+                if denom != 0:
+                    cross.append(float((a_vals[j] - a_vals[i]) / denom))
+            # Sample γ values near each crossover.
+            new_res = []
+            for c in cross:
+                if not (gamma_min <= c <= gamma_max):
+                    continue
+                for k in range(1, adaptive_n_refine + 1):
+                    offset = delta * k / adaptive_n_refine
+                    for g in (c - offset, c + offset):
+                        if gamma_min <= g <= gamma_max:
+                            new_res.append(round(g, 5))
+            new_res = sorted(set(new_res))
+            n_before = len(partitions)
+            _generate(new_res, partitions, seen_signatures)
+            if len(partitions) == n_before:
+                if verbose:
+                    print(f"  adaptive iter {it+1}: hull stable, stopping")
+                break
+            _compute_ab(n_before)
+            a_vals = np.array([p['a'] for p in partitions])
+            b_vals = np.array([p['b'] for p in partitions])
+            if verbose:
+                print(f"  adaptive iter {it+1}: +"
+                       f"{len(partitions) - n_before} partitions")
+            delta /= 2  # progressively tighter
+
     # Restore or drop the scratch column.
     if _preexisting_tmp is not None:
         adata.obs[TMP_KEY] = _preexisting_tmp
@@ -323,19 +466,7 @@ def champ(
         del adata.obs[TMP_KEY]
 
     if verbose:
-        print(f"  {len(partitions)} unique partitions "
-               f"(from {len(resolutions)} resolutions)")
-
-    # 2. Compute (a, b) for each unique partition.
-    W = adata.obsp['connectivities']
-    b_vals = np.empty(len(partitions))
-    a_vals = np.empty(len(partitions))
-    for i, p in enumerate(partitions):
-        a, b = _modularity_coefficients(W, p['labels'])
-        a_vals[i] = a
-        b_vals[i] = b
-        p['a'] = a
-        p['b'] = b
+        print(f"  total: {len(partitions)} unique partitions")
 
     # 3. Upper convex hull in (b, a) plane.
     hull_idx = _upper_hull_indices(b_vals, a_vals)
@@ -432,6 +563,9 @@ def champ(
         'gamma_min':             float(gamma_min),
         'gamma_max':             float(gamma_max),
         'width_metric':          width_metric,
+        'modularity':            modularity,
+        'n_seeds':               int(n_seeds),
+        'adaptive':              bool(adaptive),
     }
     add_reference(
         adata, key_added,

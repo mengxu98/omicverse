@@ -308,3 +308,125 @@ def test_width_metric_unknown_raises(adata_with_neighbors):
             a, n_partitions=6, width_metric="bogus",
             random_state=0, verbose=False,
         )
+
+
+# ─────────────────────── n_seeds ──────────────────────────────────────────────
+
+
+def test_n_seeds_can_grow_candidate_pool(adata_with_neighbors):
+    """``n_seeds=k`` runs leiden ``k`` times per γ; the resulting
+    candidate pool is at least as large as ``n_seeds=1`` (sometimes
+    larger when different seeds find different local optima)."""
+    import omicverse as ov
+
+    a1 = adata_with_neighbors.copy()
+    _, _, df1 = ov.pp.champ(
+        a1, n_partitions=8, n_seeds=1,
+        gamma_min=0.05, gamma_max=2.0,
+        random_state=0, verbose=False,
+    )
+    a3 = adata_with_neighbors.copy()
+    _, _, df3 = ov.pp.champ(
+        a3, n_partitions=8, n_seeds=3,
+        gamma_min=0.05, gamma_max=2.0,
+        random_state=0, verbose=False,
+    )
+    # n_seeds=3 considers ≥ as many partitions as n_seeds=1; uns
+    # records the value used.
+    assert len(df3) >= len(df1)
+    assert a3.uns["champ"]["n_seeds"] == 3
+    assert a1.uns["champ"]["n_seeds"] == 1
+
+
+def test_n_seeds_zero_or_negative_raises(adata_with_neighbors):
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    with pytest.raises(ValueError, match="n_seeds"):
+        ov.pp.champ(a, n_partitions=4, n_seeds=0,
+                     random_state=0, verbose=False)
+
+
+# ─────────────────────── modularity flavour ───────────────────────────────────
+
+
+def test_modularity_coefficients_cpm():
+    """CPM coefficients on the same 2·K_3 graph: ``a`` matches Newman
+    (within-cluster edge weight is the same), but ``b_CPM = Σ |c|² / N²``
+    differs from ``b_Newman = Σ D_c² / (2m)²``."""
+    from omicverse.pp._champ import _modularity_coefficients
+
+    A = np.zeros((6, 6))
+    for i in range(3):
+        for j in range(3):
+            if i != j:
+                A[i, j] = 1.0
+    for i in range(3, 6):
+        for j in range(3, 6):
+            if i != j:
+                A[i, j] = 1.0
+    W = sp.csr_matrix(A)
+    labels = np.array([0, 0, 0, 1, 1, 1])
+    a_cpm, b_cpm = _modularity_coefficients(W, labels, modularity="cpm")
+    a_new, b_new = _modularity_coefficients(W, labels, modularity="newman")
+    # Both use the same 'a' (within-cluster edge weight / total).
+    assert a_cpm == pytest.approx(a_new)
+    # b_CPM = (3² + 3²) / 6² = 18/36 = 0.5 — same as b_Newman by
+    # coincidence on this regular graph (D_c is constant).
+    assert b_cpm == pytest.approx(0.5)
+
+
+def test_modularity_unknown_raises():
+    from omicverse.pp._champ import _modularity_coefficients
+    W = sp.csr_matrix(np.eye(3))
+    labels = np.array([0, 1, 2])
+    with pytest.raises(ValueError, match="modularity"):
+        _modularity_coefficients(W, labels, modularity="bogus")
+
+
+def test_champ_modularity_cpm_runs(adata_with_neighbors):
+    """End-to-end CPM scoring path. Only validates that the run
+    completes and the uns payload records modularity='cpm' — the
+    chosen partition naturally differs from Newman scoring (different
+    objectives) and is data-dependent."""
+    import omicverse as ov
+
+    a = adata_with_neighbors.copy()
+    try:
+        _, _, df = ov.pp.champ(
+            a, n_partitions=8, modularity="cpm",
+            gamma_min=1e-4, gamma_max=1e-2,  # CPM γ-scale is much smaller
+            random_state=0, verbose=False,
+        )
+    except ImportError as exc:
+        pytest.skip(f"leidenalg not installed: {exc}")
+    assert a.uns["champ"]["modularity"] == "cpm"
+    assert "champ" in a.obs.columns
+
+
+# ─────────────────────── adaptive refinement ──────────────────────────────────
+
+
+def test_adaptive_appends_or_stabilises(adata_with_neighbors):
+    """``adaptive=True`` either grows the partition set (if hidden
+    crossovers were found) or terminates when the hull stabilises.
+    Either way the result is at least as good (by hull size) as the
+    non-adaptive baseline."""
+    import omicverse as ov
+
+    a_base = adata_with_neighbors.copy()
+    _, _, df_base = ov.pp.champ(
+        a_base, n_partitions=6,
+        gamma_min=0.05, gamma_max=2.0,
+        random_state=0, verbose=False,
+    )
+    a_adp = adata_with_neighbors.copy()
+    _, _, df_adp = ov.pp.champ(
+        a_adp, n_partitions=6, adaptive=True,
+        adaptive_max_iter=2, adaptive_n_refine=2,
+        gamma_min=0.05, gamma_max=2.0,
+        random_state=0, verbose=False,
+    )
+    assert len(df_adp) >= len(df_base)
+    assert a_adp.uns["champ"]["adaptive"] is True
+    assert a_base.uns["champ"]["adaptive"] is False

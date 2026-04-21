@@ -157,6 +157,7 @@ from ._spatialseg import (
 from ._nanostring import nanostring, nanostringseg
 from ._violin import violin
 from ._report import (
+    auto_resolution_curve,
     cluster_sizes_bar,
     doublet_score_histogram,
     highly_variable_genes_scatter,
@@ -343,6 +344,7 @@ __all__ = [
     # @ _violin
     "violin",
     # @ _report
+    "auto_resolution_curve",
     "cluster_sizes_bar",
     "doublet_score_histogram",
     "highly_variable_genes_scatter",

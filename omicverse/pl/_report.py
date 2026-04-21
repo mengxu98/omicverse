@@ -24,6 +24,117 @@ def _resolve_palette(n: int) -> list[str]:
     return [base[i % len(base)] for i in range(n)]
 
 
+def auto_resolution_curve(
+    adata=None,
+    *,
+    scores=None,
+    best: Optional[float] = None,
+    show_real: bool = True,
+    show_null: bool = True,
+    show_excess: bool = True,
+    title: str = "Resolution-stability curve (Lange et al. 2004)",
+    figsize: tuple[float, float] = (6.4, 4.0),
+    ax: Optional[plt.Axes] = None,
+    show: Optional[bool] = None,
+    return_fig: bool = False,
+):
+    """Line-plot of bootstrap-stability scores from
+    :func:`omicverse.single.auto_resolution`.
+
+    Without arguments, reads the scores stored at
+    ``adata.uns['autoResolution']``::
+
+        ov.single.auto_resolution(adata)
+        ov.pl.auto_resolution_curve(adata)
+
+    Or pass an explicit ``scores`` table — either the DataFrame returned
+    by ``auto_resolution`` or the dict form
+    ``adata.uns['autoResolution']['scores']`` (round-trips through h5ad).
+
+    Parameters
+    ----------
+    adata
+        AnnData on which ``auto_resolution`` was run. If ``scores`` is
+        not given, it is pulled from
+        ``adata.uns['autoResolution']['scores']``.
+    scores
+        Optional explicit override (DataFrame or scores dict).
+    best
+        Resolution to highlight with a vertical line. If ``None``, the
+        function uses ``adata.uns['autoResolution']['best_resolution']``
+        (or, failing that, the argmax of ``excess_stability``).
+    show_real, show_null, show_excess
+        Toggle individual lines.
+    """
+    import pandas as pd
+
+    if scores is None:
+        if adata is None or "autoResolution" not in adata.uns:
+            raise ValueError(
+                "auto_resolution_curve needs either `scores` or an "
+                "AnnData with `adata.uns['autoResolution']` populated "
+                "by ov.single.auto_resolution(adata)."
+            )
+        scores = adata.uns["autoResolution"]["scores"]
+        if best is None:
+            best = adata.uns["autoResolution"].get("best_resolution")
+
+    if isinstance(scores, dict):
+        df = pd.DataFrame(scores).set_index("resolution").sort_index()
+    else:
+        df = scores.sort_index() if hasattr(scores, "sort_index") \
+              else pd.DataFrame(scores)
+
+    have_null = ("stability_null" in df.columns
+                  and df["stability_null"].abs().sum() > 0)
+    have_excess = "excess_stability" in df.columns and have_null
+    if best is None:
+        best = float(
+            df["excess_stability"].idxmax() if have_excess
+            else df["stability_real"].idxmax()
+        )
+
+    created = ax is None
+    fig = ax.figure if ax is not None else plt.figure(figsize=figsize)
+    if ax is None:
+        ax = fig.add_subplot(111)
+
+    x = df.index.astype(float).values
+    if show_real and "stability_real" in df.columns:
+        ax.plot(x, df["stability_real"].values, "o-",
+                color=sc_color[0], lw=1.6, ms=5,
+                label="real (bootstrap mean ARI)")
+    if show_null and have_null:
+        ax.plot(x, df["stability_null"].values, "s--",
+                color="#B7B1A4", lw=1.2, ms=4,
+                label="null (per-gene permutation)")
+    if show_excess and have_excess:
+        ax.plot(x, df["excess_stability"].values, "D-",
+                color=sc_color[10], lw=2.0, ms=6,
+                label="excess = real − null")
+
+    ax.axvline(best, color=sc_color[10], lw=1.0, ls=":", alpha=0.7)
+    n_cl = (int(df.loc[best, "n_clusters"])
+            if "n_clusters" in df.columns and best in df.index else None)
+    label_y = ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0
+    ax.text(best, label_y, f" chosen r={best}"
+                              + (f"\n {n_cl} clusters" if n_cl is not None else ""),
+            va="top", ha="left", fontsize=10,
+            color=sc_color[10], alpha=0.95)
+
+    ax.set_xlabel("Leiden resolution")
+    ax.set_ylabel("stability (mean bootstrap ARI)")
+    ax.set_title(title)
+    ax.axhline(0, color="#888", lw=0.5, alpha=0.5)
+    ax.legend(loc="lower right", frameon=False, fontsize=9)
+
+    if show:
+        plt.show()
+    if created and return_fig:
+        return fig
+    return ax
+
+
 def cluster_sizes_bar(
     adata,
     groupby: str,

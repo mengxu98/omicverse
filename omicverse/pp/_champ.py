@@ -502,8 +502,11 @@ def champ(
             # Middle: bracketed by two crossovers
             lo = crossovers[k]
             hi = crossovers[k - 1]
-        gamma_lo[hi_pos] = max(0.0, lo)
-        gamma_hi[hi_pos] = min(gamma_max, hi)
+        # Clamp to [0, gamma_max]. The upper clamp on gamma_lo matters
+        # when two hull partitions share a 'b' value: their crossover is
+        # +inf, which would otherwise propagate as NaN through log-widths.
+        gamma_lo[hi_pos] = min(gamma_max, max(0.0, lo))
+        gamma_hi[hi_pos] = max(0.0, min(gamma_max, hi))
 
     # 6. Pick the widest range under the chosen metric. Clamp negative
     # widths to zero (a hull partition whose admissible region extends

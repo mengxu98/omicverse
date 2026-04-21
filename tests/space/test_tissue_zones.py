@@ -153,7 +153,10 @@ class TestNMFTissueZones:
 
         adata, _ = _synthetic_abundance(seed=7)
         X = adata.obsm["q05_cell_abundance_w_sf"]
-        custom_names = [f"tangram_ct_{ch}" for ch in "ABCDEFGH"]
+        # Names that don't share a strippable common prefix — the
+        # helper should pass them through as-is.
+        custom_names = ["T_CD4_naive", "T_CD8", "B_mem", "FDC",
+                        "Macrophages_M1", "Mast", "NK", "Endothelium"]
         adata.obsm["tangram_ct_pred"] = pd.DataFrame(
             X, index=adata.obs_names, columns=custom_names,
         )
@@ -192,6 +195,79 @@ class TestNMFTissueZones:
             f"Expected row-norm to reduce factor spread; "
             f"got std raw={std_raw:.3f} vs norm={std_norm:.3f}"
         )
+
+    def test_uns_names_beat_dataframe_columns(self):
+        """Cell2location writes both uns[f'{obsm_key}_names'] (clean
+        cell type labels) and stores obsm as a DataFrame whose
+        columns are prefixed with the obsm key. The uns copy should
+        win so heatmaps get ``B_mem`` instead of
+        ``q05_cell_abundance_w_sf_B_mem``."""
+        import omicverse as ov
+
+        adata, _ = _synthetic_abundance(seed=10)
+        clean = [f"clean_{i}" for i in range(8)]
+        ugly = [f"q05_prefix_{i}" for i in range(8)]
+        adata.uns["q05_cell_abundance_w_sf_names"] = clean
+        # Put an ugly-prefix DataFrame into obsm (simulates c2l's real
+        # storage)
+        X = adata.obsm["q05_cell_abundance_w_sf"]
+        adata.obsm["q05_cell_abundance_w_sf"] = pd.DataFrame(
+            X, index=adata.obs_names, columns=ugly,
+        )
+        tz = ov.space.nmf_tissue_zones(
+            adata, obsm_key="q05_cell_abundance_w_sf",
+            n_factors=3, seed=0,
+        )
+        # Expect the clean uns names, not the prefixed DataFrame cols
+        assert list(tz.factor_loadings.index) == clean, (
+            f"expected uns names to win; got "
+            f"{list(tz.factor_loadings.index)[:3]}..."
+        )
+
+    def test_uns_mod_factor_names_fallback(self):
+        """Modern cell2location writes clean labels only to
+        ``uns['mod']['factor_names']`` — no top-level uns key — and
+        the DataFrame columns are verbosely prefixed. We must still
+        surface the clean labels (second-priority source)."""
+        import omicverse as ov
+
+        adata, _ = _synthetic_abundance(seed=11)
+        clean = [f"CT_{ch}" for ch in "ABCDEFGH"]
+        ugly_prefix = "q05cell_abundance_w_sf_"
+        ugly = [f"{ugly_prefix}{n}" for n in clean]
+        X = adata.obsm["q05_cell_abundance_w_sf"]
+        adata.obsm["q05_cell_abundance_w_sf"] = pd.DataFrame(
+            X, index=adata.obs_names, columns=ugly,
+        )
+        adata.uns["mod"] = {"factor_names": clean}
+        tz = ov.space.nmf_tissue_zones(
+            adata, obsm_key="q05_cell_abundance_w_sf",
+            n_factors=3, seed=0,
+        )
+        assert list(tz.factor_loadings.index) == clean
+
+    def test_common_prefix_stripped_from_dataframe_columns(self):
+        """If no uns names are available and the DataFrame columns
+        share a common prefix, we strip it so heatmap labels stay
+        readable. This helps older cell2location exports where
+        factor_names isn't written."""
+        import omicverse as ov
+
+        adata, _ = _synthetic_abundance(seed=12)
+        ugly_prefix = "tangram_ct_pred_"
+        raw = [f"{ugly_prefix}CT_{ch}" for ch in "ABCDEFGH"]
+        X = adata.obsm["q05_cell_abundance_w_sf"]
+        adata.obsm["tangram_ct_pred"] = pd.DataFrame(
+            X, index=adata.obs_names, columns=raw,
+        )
+        tz = ov.space.nmf_tissue_zones(
+            adata, obsm_key="tangram_ct_pred",
+            n_factors=3, seed=0,
+        )
+        # Prefix should be stripped
+        assert list(tz.factor_loadings.index) == [
+            f"CT_{ch}" for ch in "ABCDEFGH"
+        ], list(tz.factor_loadings.index)
 
     def test_rejects_unknown_normalize(self):
         import omicverse as ov

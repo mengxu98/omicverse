@@ -230,21 +230,61 @@ def nmf_tissue_zones(
             f"normalize must be None, 'none', or 'rows'; got {normalize!r}."
         )
 
-    # Resolve cell-type names
+    # Resolve cell-type names. Priority:
+    #   1. explicit kwarg                          (user override)
+    #   2. adata.uns[f"{obsm_key}_names"]          (cell2location clean)
+    #   3. adata.uns['mod']['factor_names']        (cell2location modern)
+    #   4. DataFrame column names (with common-prefix strip)
+    #   5. positional placeholders
+    #
+    # Cell2location stores the cell-type axis **twice**: as a
+    # DataFrame whose columns are verbosely prefixed
+    # (``q05cell_abundance_w_sf_B_Cycling``, …) *and* as a clean flat
+    # list under ``uns['mod']['factor_names']``. Users want the clean
+    # labels on the heatmap, so the uns paths win over the DataFrame
+    # columns. If we do fall through to the DataFrame columns (Tangram
+    # pattern, or older c2l exports), we also try to strip any shared
+    # prefix across every column so the labels stay readable.
+    def _strip_common_prefix(names):
+        """Strip the longest underscore-ending prefix shared by all
+        names, provided every remaining name is at least 2 chars. The
+        2-char floor is what keeps us from over-stripping
+        `tangram_ct_pred_CT_{A,B,C}` down to `{A,B,C}`: the remainder
+        would collapse to a single letter, which is never what users
+        actually want on a heatmap label."""
+        if not names or len(names) == 1:
+            return list(names)
+        s = list(names)
+        first = s[0]
+        best = ""
+        # Candidate cuts are the underscore positions in the first
+        # name. Accept the longest one for which (a) every other name
+        # also starts with that prefix and (b) the remainder has
+        # length ≥ 2 for every name.
+        for i, ch in enumerate(first):
+            if ch != "_":
+                continue
+            candidate = first[: i + 1]
+            if not all(n.startswith(candidate) for n in s):
+                continue
+            if not all(len(n) - len(candidate) >= 2 for n in s):
+                continue
+            best = candidate
+        if not best:
+            return s
+        return [n[len(best):] for n in s]
+
     if cell_type_names is None:
-        if inferred_columns is not None:
-            cell_type_names = inferred_columns
+        cand = adata.uns.get(f"{obsm_key}_names")
+        if cand is None:
+            cand = adata.uns.get("mod", {}).get("factor_names")
+        if cand is not None and len(cand) == X.shape[1]:
+            cell_type_names = list(cand)
+        elif inferred_columns is not None:
+            cell_type_names = _strip_common_prefix(inferred_columns)
         else:
-            cand = adata.uns.get(f"{obsm_key}_names")
-            if cand is not None and len(cand) == X.shape[1]:
-                cell_type_names = list(cand)
-            else:
-                cand = adata.uns.get("mod", {}).get("factor_names")
-                if cand is not None and len(cand) == X.shape[1]:
-                    cell_type_names = list(cand)
-                else:
-                    cell_type_names = [f"cell_type_{i}"
-                                       for i in range(X.shape[1])]
+            cell_type_names = [f"cell_type_{i}"
+                               for i in range(X.shape[1])]
     else:
         cell_type_names = list(cell_type_names)
         if len(cell_type_names) != X.shape[1]:

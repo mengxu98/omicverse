@@ -98,6 +98,7 @@ def nmf_tissue_zones(
     top_k: int = 5,
     obsm_added: str = "X_tissue_zones",
     factor_prefix: str = "zone",
+    normalize: Optional[str] = None,
     init: str = "nndsvd",
     max_iter: int = 500,
     tol: float = 1e-4,
@@ -137,6 +138,16 @@ def nmf_tissue_zones(
     factor_prefix
         Prefix for factor names; the i-th factor is
         ``f'{factor_prefix}_{i+1}'``.
+    normalize
+        ``None`` (default) to feed the matrix straight to NMF, or
+        ``'rows'`` to row-sum-normalise each spot to 1 first —
+        recommended when ``obsm_key`` carries **mapping probabilities**
+        or any non-abundance quantity where per-spot total-signal is
+        not biologically meaningful (for example Tangram's
+        ``tangram_ct_pred``). Skip for Cell2location's
+        ``q05_cell_abundance_w_sf``, which is an absolute-abundance
+        scale and should be fed as-is so inter-spot abundance
+        differences are preserved.
     init, max_iter, tol, seed
         Forwarded to ``sklearn.decomposition.NMF``. ``init='nndsvd'``
         gives deterministic initialisation; ``'random'`` + ``seed``
@@ -171,7 +182,19 @@ def nmf_tissue_zones(
             f"adata.obsm has no key {obsm_key!r}. Available: "
             f"{list(adata.obsm.keys())[:8]}."
         )
-    X = np.asarray(adata.obsm[obsm_key], dtype=np.float64)
+
+    obsm_val = adata.obsm[obsm_key]
+    # Pandas DataFrame in obsm (Tangram's tangram_ct_pred pattern)
+    # carries column names as the cell-type axis — prefer those over
+    # the adata.uns look-up so users get human-readable labels
+    # without having to pass cell_type_names= explicitly.
+    inferred_columns = None
+    if isinstance(obsm_val, pd.DataFrame):
+        inferred_columns = list(obsm_val.columns)
+        X = obsm_val.to_numpy(dtype=np.float64)
+    else:
+        X = np.asarray(obsm_val, dtype=np.float64)
+
     if X.ndim != 2:
         raise ValueError(
             f"obsm[{obsm_key!r}] must be 2-D, got shape {X.shape}."
@@ -194,18 +217,34 @@ def nmf_tissue_zones(
     if min_val < 0:
         X = np.clip(X, 0.0, None)
 
+    if normalize == "rows":
+        # Per-spot compositional normalisation. Recommended for
+        # Tangram's `tangram_ct_pred` (mapping-probability-derived,
+        # not an absolute-abundance scale) so total-signal per spot
+        # doesn't dominate the first factor.
+        row_sum = X.sum(axis=1, keepdims=True)
+        row_sum = np.where(row_sum > 0, row_sum, 1.0)
+        X = X / row_sum
+    elif normalize not in (None, "none"):
+        raise ValueError(
+            f"normalize must be None, 'none', or 'rows'; got {normalize!r}."
+        )
+
     # Resolve cell-type names
     if cell_type_names is None:
-        cand = adata.uns.get(f"{obsm_key}_names")
-        if cand is not None and len(cand) == X.shape[1]:
-            cell_type_names = list(cand)
+        if inferred_columns is not None:
+            cell_type_names = inferred_columns
         else:
-            cand = adata.uns.get("mod", {}).get("factor_names")
+            cand = adata.uns.get(f"{obsm_key}_names")
             if cand is not None and len(cand) == X.shape[1]:
                 cell_type_names = list(cand)
             else:
-                cell_type_names = [f"cell_type_{i}"
-                                   for i in range(X.shape[1])]
+                cand = adata.uns.get("mod", {}).get("factor_names")
+                if cand is not None and len(cand) == X.shape[1]:
+                    cell_type_names = list(cand)
+                else:
+                    cell_type_names = [f"cell_type_{i}"
+                                       for i in range(X.shape[1])]
     else:
         cell_type_names = list(cell_type_names)
         if len(cell_type_names) != X.shape[1]:

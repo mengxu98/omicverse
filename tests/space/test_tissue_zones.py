@@ -144,3 +144,61 @@ class TestNMFTissueZones:
         )
         assert np.isfinite(tz.reconstruction_err)
         assert tz.reconstruction_err >= 0
+
+    def test_dataframe_obsm_infers_column_names(self):
+        """When obsm[obsm_key] is a pandas DataFrame (Tangram pattern),
+        cell type axis should be read from the DataFrame's columns
+        rather than falling back to ``cell_type_N`` placeholders."""
+        import omicverse as ov
+
+        adata, _ = _synthetic_abundance(seed=7)
+        X = adata.obsm["q05_cell_abundance_w_sf"]
+        custom_names = [f"tangram_ct_{ch}" for ch in "ABCDEFGH"]
+        adata.obsm["tangram_ct_pred"] = pd.DataFrame(
+            X, index=adata.obs_names, columns=custom_names,
+        )
+        tz = ov.space.nmf_tissue_zones(
+            adata, obsm_key="tangram_ct_pred", n_factors=3, seed=0,
+        )
+        assert list(tz.factor_loadings.index) == custom_names, (
+            f"Expected DataFrame columns to be used as cell-type "
+            f"labels; got {list(tz.factor_loadings.index)[:5]}"
+        )
+
+    def test_row_normalize(self):
+        """``normalize='rows'`` should feed a row-stochastic matrix to
+        NMF (each spot's contribution sums to 1). Useful when obsm
+        carries mapping probabilities rather than abundances."""
+        import omicverse as ov
+
+        adata, _ = _synthetic_abundance(seed=8)
+        # Skew one spot to be 100x brighter so row-normalisation has
+        # something concrete to flatten.
+        adata.obsm["q05_cell_abundance_w_sf"][0] *= 100
+        tz_raw = ov.space.nmf_tissue_zones(
+            adata, obsm_key="q05_cell_abundance_w_sf",
+            n_factors=3, normalize=None, seed=0,
+        )
+        tz_norm = ov.space.nmf_tissue_zones(
+            adata, obsm_key="q05_cell_abundance_w_sf",
+            n_factors=3, normalize="rows", seed=0,
+        )
+        # Under row-normalisation the loud spot can no longer
+        # dominate factor 1 on its own, so the spread of activations
+        # across the first factor is tighter (much smaller std vs mean).
+        std_raw = np.std(tz_raw.spot_activations.iloc[:, 0])
+        std_norm = np.std(tz_norm.spot_activations.iloc[:, 0])
+        assert std_norm < std_raw, (
+            f"Expected row-norm to reduce factor spread; "
+            f"got std raw={std_raw:.3f} vs norm={std_norm:.3f}"
+        )
+
+    def test_rejects_unknown_normalize(self):
+        import omicverse as ov
+
+        adata, _ = _synthetic_abundance(seed=9)
+        with pytest.raises(ValueError, match="normalize"):
+            ov.space.nmf_tissue_zones(
+                adata, obsm_key="q05_cell_abundance_w_sf",
+                n_factors=3, normalize="zscore",
+            )

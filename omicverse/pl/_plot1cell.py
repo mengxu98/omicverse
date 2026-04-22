@@ -107,8 +107,30 @@ def _data_unit_per_pt(ax):
     return 1.0 / max(pt_per_data, 1e-9)
 
 
+def _current_font_family():
+    """Resolve the currently active matplotlib font family to a concrete
+    name. We pass this *explicitly* to every per-character ``ax.text``
+    call below — without it, matplotlib's rotated-single-character path
+    sometimes falls through to ``DejaVu Serif`` even when ``rcParams['font.family']``
+    points at a registered sans-serif (e.g. Arial via ``ov.style()``).
+    The visible symptom is the outer ring labels appearing in serifs
+    while the inner UMAP labels stay sans-serif (issue: 'outer label
+    font looks weird vs centre label')."""
+    fam = plt.rcParams.get("font.family", ["sans-serif"])
+    if isinstance(fam, str):
+        fam = [fam]
+    name = fam[0] if fam else "sans-serif"
+    if name in ("sans-serif", "serif", "monospace", "cursive", "fantasy"):
+        # Generic family — resolve to the first concrete entry.
+        concrete = plt.rcParams.get(f"font.{name}", [])
+        if concrete:
+            return concrete[0]
+    return name
+
+
 def _bend_one_line(ax, line, a_center_deg, radius, fontsize, *,
-                   color="black", zorder=5, char_width_ratio=0.55):
+                   color="black", zorder=5, char_width_ratio=0.55,
+                   fontname=None):
     """Draw one line of text curved along the arc at ``radius``, centered
     on angle ``a_center_deg`` (degrees). Emulates circlize's
     ``facing='bending.inside'`` with ``niceFacing=TRUE``: the upper half
@@ -119,6 +141,8 @@ def _bend_one_line(ax, line, a_center_deg, radius, fontsize, *,
     lower half)."""
     if not line:
         return
+    if fontname is None:
+        fontname = _current_font_family()
     n = len(line)
     upt = _data_unit_per_pt(ax)
     char_w_data = fontsize * char_width_ratio * upt
@@ -143,12 +167,13 @@ def _bend_one_line(ax, line, a_center_deg, radius, fontsize, *,
             ha="center", va="center",
             rotation=rot, rotation_mode="anchor",
             fontsize=fontsize, color=color, zorder=zorder,
+            fontname=fontname,
         )
 
 
 def _bending_label(ax, text, a0_deg, a1_deg, radius, fontsize, *,
                    color="black", zorder=5, char_width_ratio=0.55,
-                   max_lines=3):
+                   max_lines=3, fontname=None):
     """Place ``text`` centered in the sector ``[a0_deg, a1_deg]`` along
     the arc at ``radius``, wrapping to at most ``max_lines`` lines if the
     label is too long to fit at the sector's angular width. Extra lines
@@ -157,6 +182,8 @@ def _bending_label(ax, text, a0_deg, a1_deg, radius, fontsize, *,
     text = str(text).strip()
     if not text:
         return
+    if fontname is None:
+        fontname = _current_font_family()
     mid = 0.5 * (a0_deg + a1_deg)
     sector_w = max(a1_deg - a0_deg, 1e-3)
 
@@ -191,17 +218,124 @@ def _bending_label(ax, text, a0_deg, a1_deg, radius, fontsize, *,
             ax, line, mid, r, fontsize,
             color=color, zorder=zorder,
             char_width_ratio=char_width_ratio,
+            fontname=fontname,
         )
+
+
+def _radial_outer_labels(ax, items, label_r, fontsize, *,
+                         color="black", zorder=5, fontname=None,
+                         repel=True, leader_color="#888",
+                         leader_lw=0.4, wrap_width=12):
+    """Draw cluster names *horizontally* just outside the ring.
+
+    Each label is a SINGLE ``ax.text`` placed at the sector midpoint;
+    long names wrap to multiple lines (``textwrap``) so they don't
+    crowd neighbours. The anchor is chosen per quadrant so labels
+    radiate outward visually without ever rotating: the left half uses
+    ``ha='right'``, the right half ``ha='left'``; top/bottom regions
+    centre horizontally and stack the wrapped lines above/below the
+    midpoint. If ``adjustText`` is available, overlaps are repelled
+    and a thin leader line is drawn back to the sector midpoint.
+
+    ``items`` is an iterable of ``(name, mid_angle_deg)`` pairs."""
+    import re
+    import textwrap
+
+    def _wrap(name: str, width: int) -> str:
+        """Wrap on whitespace, '_' or '-' (which are common separators
+        in cluster names), keeping the separators."""
+        if len(name) <= width:
+            return name
+        # Split keeping the separator on the preceding token so the
+        # rendered line shows e.g. "Memory_" / "B_Cell".
+        toks, buf = [], ""
+        for piece in re.split(r"([ _\-])", name):
+            buf += piece
+            if piece in (" ", "_", "-"):
+                toks.append(buf)
+                buf = ""
+        if buf:
+            toks.append(buf)
+        if not toks:
+            return name
+        lines, cur = [], ""
+        for t in toks:
+            if cur and len(cur) + len(t) > width:
+                lines.append(cur)
+                cur = t
+            else:
+                cur += t
+        if cur:
+            lines.append(cur)
+        # Fallback: any single token still longer than width gets a
+        # hard textwrap so very long monolithic names don't blow out.
+        out = []
+        for ln in lines:
+            if len(ln) > width:
+                out.extend(textwrap.wrap(ln, width=width) or [ln])
+            else:
+                out.append(ln)
+        return "\n".join(out)
+
+    if fontname is None:
+        fontname = _current_font_family()
+    texts = []
+    for name, mid in items:
+        m = mid % 360.0
+        rad = np.deg2rad(m)
+        cx, cy = np.cos(rad), np.sin(rad)
+        x = label_r * cx
+        y = label_r * cy
+        # Quadrant-aware alignment so the text edge nearest the ring
+        # is the anchor point — keeps the label visually radiating
+        # outward without rotation.
+        if cx > 0.30:
+            ha = "left"
+        elif cx < -0.30:
+            ha = "right"
+        else:
+            ha = "center"
+        if cy > 0.30:
+            va = "bottom"
+        elif cy < -0.30:
+            va = "top"
+        else:
+            va = "center"
+        wrapped = _wrap(str(name), wrap_width)
+        t = ax.text(
+            x, y, wrapped,
+            ha=ha, va=va,
+            rotation=0,
+            fontsize=fontsize, color=color, zorder=zorder,
+            fontname=fontname,
+            linespacing=0.95,
+        )
+        texts.append(t)
+    if not repel or not texts:
+        return
+    try:
+        from adjustText import adjust_text
+    except ImportError:
+        return
+    adjust_text(
+        texts, ax=ax,
+        only_move={"text": "xy", "static": "xy"},
+        expand=(1.05, 1.15),
+        arrowprops=dict(arrowstyle="-", color=leader_color, lw=leader_lw),
+    )
 
 
 def _draw_sector_ticks(ax, a0_deg, a1_deg, r_base, n_cells, *,
                        tick_len=0.012, tick_color="black", tick_lw=0.5,
-                       fontsize=4.5, text_color="black", zorder=4.6):
+                       fontsize=4.5, text_color="black", zorder=4.6,
+                       fontname=None):
     """Draw ``circos.axis``-style tick marks on the outer edge of a
     sector at radius ``r_base``, pointing radially outward. Ticks sit at
     integer values of the log10 cell rank (R: ``x_polar2``), matching
     plot_circlize's default axis. Numeric labels (small) sit just
     beyond each tick."""
+    if fontname is None:
+        fontname = _current_font_family()
     log_max = float(np.log10(max(n_cells, 1)))
     if log_max <= 0:
         tick_vals = [0]
@@ -238,6 +372,7 @@ def _draw_sector_ticks(ax, a0_deg, a1_deg, r_base, n_cells, *,
             lx, ly, str(tv), ha="center", va="center",
             rotation=rot, rotation_mode="anchor",
             fontsize=fontsize, color=text_color, zorder=zorder,
+            fontname=fontname,
         )
 
 
@@ -291,7 +426,7 @@ def plot1cell(
     kde_n: int = 200,
     do_label: bool = True,
     label_fontsize: float = 9.0,
-    label_orient: str = "bending",
+    label_orient: str = "radial",
     cluster_palette=None,
     track_palette=None,
     track_palettes: Optional[Sequence] = None,
@@ -569,6 +704,7 @@ def plot1cell(
             fontsize=label_fontsize * 0.75,
             rotation=-90, rotation_mode="anchor",
             zorder=5,
+            fontname=_current_font_family(),
         )
 
     # --- 7b. Outer-ring ticks (circos.axis) + bending cluster labels ---
@@ -587,10 +723,19 @@ def plot1cell(
             + (tick_length * 2.2 if show_ticks else 0.0)
             + cluster_label_pad
         )
-        for cl, (a0, a1) in sector_bounds.items():
-            _bending_label(
-                ax, str(cl), a0, a1, label_r,
-                label_fontsize, zorder=5,
+        if label_orient == "bending":
+            for cl, (a0, a1) in sector_bounds.items():
+                _bending_label(
+                    ax, str(cl), a0, a1, label_r,
+                    label_fontsize, zorder=5,
+                )
+        else:  # "radial" — single ax.text per label, native kerning
+            items = [
+                (cl, 0.5 * (a0 + a1))
+                for cl, (a0, a1) in sector_bounds.items()
+            ]
+            _radial_outer_labels(
+                ax, items, label_r, label_fontsize, zorder=5,
             )
 
     # --- 8. Track legends -----------------------------------------

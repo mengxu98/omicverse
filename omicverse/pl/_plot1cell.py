@@ -295,7 +295,7 @@ def plot1cell(
     cluster_palette=None,
     track_palette=None,
     track_palettes: Optional[Sequence] = None,
-    bg_color: str = "#F9F2E4",
+    bg_color: Optional[str] = None,
     gap_between_deg: float = 2.0,
     gap_start_deg: float = 12.0,
     cluster_track_width: float = 0.035,
@@ -431,9 +431,10 @@ def plot1cell(
     outer = r_outer_ring + tick_margin + cluster_label_pad + label_margin
     ax.set_xlim(-outer, outer)
     ax.set_ylim(-outer, outer)
-    ax.set_facecolor(bg_color)
-    if created_fig:
-        fig.patch.set_facecolor(bg_color)
+    if bg_color is not None:
+        ax.set_facecolor(bg_color)
+        if created_fig:
+            fig.patch.set_facecolor(bg_color)
     ax.set_axis_off()
 
     # --- 4. Scatter + KDE -----------------------------------------

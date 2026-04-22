@@ -2381,7 +2381,7 @@ def dynamic_heatmap(
         label_names = _labels_from_targets(
             list(matrix.index),
             feature_labels,
-            min_gap=max(2, matrix.shape[0] // 45),
+            min_gap=1,
         )
     elif show_row_names:
         label_names = list(matrix.index)

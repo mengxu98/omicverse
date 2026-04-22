@@ -26,6 +26,15 @@ from .._registry import register_function
 from ._palette import sc_color, pastel_palette, vibrant_palette
 
 
+# Distinct matplotlib colormaps cycled across tracks when no palette is
+# given and no `adata.uns[f"{col}_colors"]` is stored. Picked so adjacent
+# tracks don't collide visually.
+_DEFAULT_TRACK_PALETTES = (
+    "tab20b", "tab20c", "Set3", "Paired", "Set2", "Pastel1",
+    "Dark2", "Accent", "Pastel2", "tab10",
+)
+
+
 # ------------------------------------------------------------------ #
 # Small helpers that mirror the R names so the mapping stays obvious  #
 # ------------------------------------------------------------------ #
@@ -63,6 +72,173 @@ def _resolve_palette(n: int, palette) -> List[str]:
         # Recycle
         palette = [palette[i % len(palette)] for i in range(n)]
     return palette[:n]
+
+
+def _pick_palette(n, palette, adata, key, *, fallback_idx=0):
+    """Palette precedence for a categorical column:
+    1. explicit ``palette`` arg (if given)
+    2. ``adata.uns[f"{key}_colors"]`` (if long enough)
+    3. ``_DEFAULT_TRACK_PALETTES[fallback_idx]`` matplotlib cmap
+    """
+    if palette is not None:
+        return _resolve_palette(n, palette)
+    if adata is not None and key is not None and hasattr(adata, "uns"):
+        uns_key = f"{key}_colors"
+        if uns_key in adata.uns:
+            stored = list(adata.uns[uns_key])
+            if len(stored) >= n:
+                return stored[:n]
+    cmap_name = _DEFAULT_TRACK_PALETTES[
+        fallback_idx % len(_DEFAULT_TRACK_PALETTES)
+    ]
+    cmap = plt.get_cmap(cmap_name, max(n, 1))
+    return [cmap(i) for i in range(n)]
+
+
+def _data_unit_per_pt(ax):
+    """Number of data units per 1 typographic point on ``ax``. Used to
+    translate fontsize (pt) into angular char widths when rendering
+    curved text."""
+    fig = ax.figure
+    bbox = ax.get_window_extent()
+    dx = ax.get_xlim()[1] - ax.get_xlim()[0]
+    px_per_data = max(bbox.width, 1.0) / max(dx, 1e-9)
+    pt_per_data = px_per_data * 72.0 / fig.dpi
+    return 1.0 / max(pt_per_data, 1e-9)
+
+
+def _bend_one_line(ax, line, a_center_deg, radius, fontsize, *,
+                   color="black", zorder=5, char_width_ratio=0.55):
+    """Draw one line of text curved along the arc at ``radius``, centered
+    on angle ``a_center_deg`` (degrees). Emulates circlize's
+    ``facing='bending.inside'`` with ``niceFacing=TRUE``: the upper half
+    (0° < mid < 180°) has letter tops pointing outward (reading upright
+    from outside); the lower half is flipped so tops point inward, still
+    reading upright. Letters progress so letter 0 sits on the viewer's
+    LEFT (i.e., larger angle in the upper half, smaller angle in the
+    lower half)."""
+    if not line:
+        return
+    n = len(line)
+    upt = _data_unit_per_pt(ax)
+    char_w_data = fontsize * char_width_ratio * upt
+    angle_per_char = np.rad2deg(char_w_data / max(radius, 1e-6))
+
+    mid = a_center_deg % 360.0
+    # niceFacing for bending.inside: in the lower half (180°–360°) tops
+    # would otherwise point downward, so flip to tops-inward.
+    flip = 180.0 < mid < 360.0
+
+    for i, ch in enumerate(line):
+        offset = (i - (n - 1) / 2.0) * angle_per_char
+        if flip:
+            ang = a_center_deg + offset
+            rot = (ang + 90.0) % 360.0  # tops inward
+        else:
+            ang = a_center_deg - offset
+            rot = (ang - 90.0) % 360.0  # tops outward
+        rad = np.deg2rad(ang)
+        ax.text(
+            radius * np.cos(rad), radius * np.sin(rad), ch,
+            ha="center", va="center",
+            rotation=rot, rotation_mode="anchor",
+            fontsize=fontsize, color=color, zorder=zorder,
+        )
+
+
+def _bending_label(ax, text, a0_deg, a1_deg, radius, fontsize, *,
+                   color="black", zorder=5, char_width_ratio=0.55,
+                   max_lines=3):
+    """Place ``text`` centered in the sector ``[a0_deg, a1_deg]`` along
+    the arc at ``radius``, wrapping to at most ``max_lines`` lines if the
+    label is too long to fit at the sector's angular width. Extra lines
+    stack radially outward so labels never intrude into tracks."""
+    import textwrap
+    text = str(text).strip()
+    if not text:
+        return
+    mid = 0.5 * (a0_deg + a1_deg)
+    sector_w = max(a1_deg - a0_deg, 1e-3)
+
+    upt = _data_unit_per_pt(ax)
+    char_w_data = fontsize * char_width_ratio * upt
+    angle_per_char = np.rad2deg(char_w_data / max(radius, 1e-6))
+    max_chars = max(3, int(0.95 * sector_w / max(angle_per_char, 1e-6)))
+
+    if len(text) <= max_chars:
+        lines = [text]
+    else:
+        lines = textwrap.wrap(
+            text, width=max_chars, break_long_words=False,
+            break_on_hyphens=False,
+        ) or [text]
+        if len(lines) > max_lines:
+            # Merge tail lines so we respect the line cap
+            lines = lines[: max_lines - 1] + [" ".join(lines[max_lines - 1:])]
+
+    line_h_data = fontsize * 1.25 * upt
+    # Multi-line reading order depends on the viewer's visual up. In the
+    # upper half the viewer is "above" the circle: first line sits at the
+    # largest radius (furthest from centre). In the lower half the viewer
+    # is "below", so first line sits at the smallest radius (closest to
+    # the outer ring).
+    flip = 180.0 < (mid % 360.0) < 360.0
+    n_lines = len(lines)
+    for li, line in enumerate(lines):
+        offset = li if flip else (n_lines - 1 - li)
+        r = radius + offset * line_h_data
+        _bend_one_line(
+            ax, line, mid, r, fontsize,
+            color=color, zorder=zorder,
+            char_width_ratio=char_width_ratio,
+        )
+
+
+def _draw_sector_ticks(ax, a0_deg, a1_deg, r_base, n_cells, *,
+                       tick_len=0.012, tick_color="black", tick_lw=0.5,
+                       fontsize=4.5, text_color="black", zorder=4.6):
+    """Draw ``circos.axis``-style tick marks on the outer edge of a
+    sector at radius ``r_base``, pointing radially outward. Ticks sit at
+    integer values of the log10 cell rank (R: ``x_polar2``), matching
+    plot_circlize's default axis. Numeric labels (small) sit just
+    beyond each tick."""
+    log_max = float(np.log10(max(n_cells, 1)))
+    if log_max <= 0:
+        tick_vals = [0]
+    else:
+        tick_vals = list(range(0, int(np.floor(log_max)) + 1))
+    # Baseline arc: short line along the outer edge of the ring
+    n_arc = 30
+    arc_rad = np.deg2rad(np.linspace(a0_deg, a1_deg, n_arc))
+    ax.plot(
+        r_base * np.cos(arc_rad), r_base * np.sin(arc_rad),
+        color=tick_color, lw=tick_lw, zorder=zorder,
+    )
+    for tv in tick_vals:
+        if log_max <= 0:
+            frac = 0.0
+        else:
+            frac = tv / log_max if log_max > 0 else 0.0
+        ang = a0_deg + frac * (a1_deg - a0_deg)
+        rad = np.deg2rad(ang)
+        x0 = r_base * np.cos(rad)
+        y0 = r_base * np.sin(rad)
+        x1 = (r_base + tick_len) * np.cos(rad)
+        y1 = (r_base + tick_len) * np.sin(rad)
+        ax.plot([x0, x1], [y0, y1],
+                color=tick_color, lw=tick_lw, zorder=zorder)
+        # Small numeric label just beyond tick; rotated along tangent so
+        # it sits flat on the circle (matches circos.axis default).
+        lx = (r_base + tick_len * 1.6) * np.cos(rad)
+        ly = (r_base + tick_len * 1.6) * np.sin(rad)
+        mid = ang % 360.0
+        flip = 90.0 < mid < 270.0
+        rot = (mid + 180.0) % 360.0 if flip else mid
+        ax.text(
+            lx, ly, str(tv), ha="center", va="center",
+            rotation=rot, rotation_mode="anchor",
+            fontsize=fontsize, color=text_color, zorder=zorder,
+        )
 
 
 def _run_length(vals: np.ndarray):
@@ -115,16 +291,20 @@ def plot1cell(
     kde_n: int = 200,
     do_label: bool = True,
     label_fontsize: float = 9.0,
-    label_orient: str = "auto",
+    label_orient: str = "bending",
     cluster_palette=None,
     track_palette=None,
+    track_palettes: Optional[Sequence] = None,
     bg_color: str = "#F9F2E4",
     gap_between_deg: float = 2.0,
     gap_start_deg: float = 12.0,
     cluster_track_width: float = 0.035,
     track_width: float = 0.025,
     track_gap: float = 0.004,
-    cluster_label_pad: float = 0.08,
+    cluster_label_pad: float = 0.03,
+    show_ticks: bool = True,
+    tick_fontsize: float = 4.5,
+    tick_length: float = 0.012,
     figsize=(7, 7),
     ax: Optional[Axes] = None,
     show: bool = True,
@@ -237,7 +417,18 @@ def plot1cell(
     else:
         fig = ax.figure
     ax.set_aspect("equal")
-    outer = 1.0 + cluster_track_width + len(tracks) * (track_width + track_gap) + 0.02
+    # Outer edge of the cluster ring; tracks stack from here outward.
+    r_cluster_out = 1.0 + cluster_track_width
+    tracks_total = len(tracks) * (track_width + track_gap)
+    # Outer edge of the last ring drawn (cluster ring if no tracks).
+    r_outer_ring = r_cluster_out + tracks_total
+    tick_margin = (tick_length * 2.2 if show_ticks else 0.0)
+    # Reserve room for up-to-3-line bending labels plus a safety margin.
+    # Long cluster names (e.g. "kidney loop of Henle thick ascending limb
+    # epithelial cell") stack radially outward at ~1.25 * fontsize per
+    # line; keep the plot extent generous so none get clipped.
+    label_margin = max(0.55, label_fontsize * 0.06)
+    outer = r_outer_ring + tick_margin + cluster_label_pad + label_margin
     ax.set_xlim(-outer, outer)
     ax.set_ylim(-outer, outer)
     ax.set_facecolor(bg_color)
@@ -246,7 +437,14 @@ def plot1cell(
     ax.set_axis_off()
 
     # --- 4. Scatter + KDE -----------------------------------------
-    cluster_colors = _resolve_palette(n_clusters, cluster_palette)
+    # Cluster palette: explicit > adata.uns[{clusters}_colors] > sc_color
+    # (or tab20 fallback for > len(sc_color)).
+    if cluster_palette is None and hasattr(adata, "uns") \
+            and f"{clusters}_colors" in adata.uns \
+            and len(list(adata.uns[f"{clusters}_colors"])) >= n_clusters:
+        cluster_colors = list(adata.uns[f"{clusters}_colors"])[:n_clusters]
+    else:
+        cluster_colors = _resolve_palette(n_clusters, cluster_palette)
     cl_to_color = dict(zip(cl_order, cluster_colors))
     pt_colors = [cl_to_color[c] for c in df["cluster"]]
     ax.scatter(
@@ -271,7 +469,7 @@ def plot1cell(
 
     # --- 5. Cluster ring ------------------------------------------
     r_in = 1.0
-    r_out = 1.0 + cluster_track_width
+    r_out = r_cluster_out
     for cl, (a0, a1) in sector_bounds.items():
         w = Wedge(
             center=(0, 0), r=r_out, theta1=a0, theta2=a1,
@@ -279,37 +477,6 @@ def plot1cell(
             edgecolor="none", linewidth=0, zorder=4,
         )
         ax.add_patch(w)
-
-        if do_label:
-            mid = 0.5 * (a0 + a1) % 360.0
-            rad = np.deg2rad(mid)
-            # 'auto': tangent labels for few clusters (they fit the
-            # sector), radial for many (tangent text would collide).
-            orient = label_orient
-            if orient == "auto":
-                orient = "tangent" if n_clusters <= 10 else "radial"
-            if orient == "tangent":
-                lx = (r_out + cluster_label_pad) * np.cos(rad)
-                ly = (r_out + cluster_label_pad) * np.sin(rad)
-                rot = mid - 90.0
-                if mid > 180.0:
-                    rot += 180.0
-                ax.text(lx, ly, str(cl), ha="center", va="center",
-                        rotation=rot, rotation_mode="anchor",
-                        fontsize=label_fontsize, zorder=5)
-            else:
-                # Radial: each label is a spoke — angular footprint is
-                # just one line-height, so they never collide even with
-                # 30+ clusters. On the left half we flip by 180° so the
-                # text still reads left-to-right when viewed upright.
-                flip = 90.0 < mid < 270.0
-                rot = (mid - 180.0) if flip else mid
-                ha = "right" if flip else "left"
-                lx = (r_out + cluster_label_pad * 0.4) * np.cos(rad)
-                ly = (r_out + cluster_label_pad * 0.4) * np.sin(rad)
-                ax.text(lx, ly, str(cl), ha=ha, va="center",
-                        rotation=rot, rotation_mode="anchor",
-                        fontsize=label_fontsize, zorder=5)
 
     # --- 6. In-UMAP cluster labels --------------------------------
     if do_label:
@@ -336,17 +503,39 @@ def plot1cell(
             pass
 
     # --- 7. Metadata tracks ---------------------------------------
+    # Remember per-track colors so the legend stays consistent with the
+    # rendered rings (each track gets its own palette by default).
+    track_colors_map: dict[str, dict[str, object]] = {}
+    track_level_order: dict[str, list] = {}
+
+    def _levels_for(col):
+        try:
+            return list(adata.obs[col].astype("category").cat.categories)
+        except Exception:
+            return sorted(df[col].unique().tolist())
+
     for t_idx, t in enumerate(tracks):
         r0 = r_out + track_gap + t_idx * (track_width + track_gap)
         r1 = r0 + track_width
-        levels = df[t].unique().tolist()
-        # Stable ordering (categorical if possible, else sorted)
-        try:
-            levels = list(adata.obs[t].astype("category").cat.categories)
-        except Exception:
-            levels = sorted(levels)
-        colors = _resolve_palette(len(levels), track_palette)
+        levels = _levels_for(t)
+        # Per-track palette precedence: `track_palettes[t_idx]` > `track_palette`
+        # > `adata.uns[f"{t}_colors"]` > distinct default per track index.
+        per_track_override = (
+            track_palettes[t_idx]
+            if track_palettes is not None and t_idx < len(track_palettes)
+            else None
+        )
+        if per_track_override is not None:
+            colors = _resolve_palette(len(levels), per_track_override)
+        elif track_palette is not None:
+            colors = _resolve_palette(len(levels), track_palette)
+        else:
+            colors = _pick_palette(
+                len(levels), None, adata, t, fallback_idx=t_idx + 1,
+            )
         lvl_to_color = dict(zip(levels, colors))
+        track_colors_map[t] = lvl_to_color
+        track_level_order[t] = levels
 
         for cl in cl_order:
             a0, a1 = sector_bounds[cl]
@@ -381,16 +570,35 @@ def plot1cell(
             zorder=5,
         )
 
+    # --- 7b. Outer-ring ticks (circos.axis) + bending cluster labels ---
+    if show_ticks:
+        for cl, (a0, a1) in sector_bounds.items():
+            _draw_sector_ticks(
+                ax, a0, a1, r_outer_ring,
+                int(counts[cl]),
+                tick_len=tick_length,
+                fontsize=tick_fontsize,
+            )
+
+    if do_label:
+        label_r = (
+            r_outer_ring
+            + (tick_length * 2.2 if show_ticks else 0.0)
+            + cluster_label_pad
+        )
+        for cl, (a0, a1) in sector_bounds.items():
+            _bending_label(
+                ax, str(cl), a0, a1, label_r,
+                label_fontsize, zorder=5,
+            )
+
     # --- 8. Track legends -----------------------------------------
     if tracks:
         legend_handles = []
-        for t_idx, t in enumerate(tracks):
-            try:
-                levels = list(adata.obs[t].astype("category").cat.categories)
-            except Exception:
-                levels = sorted(df[t].unique().tolist())
-            colors = _resolve_palette(len(levels), track_palette)
-            for lvl, col in zip(levels, colors):
+        for t in tracks:
+            lvl_to_color = track_colors_map[t]
+            for lvl in track_level_order[t]:
+                col = lvl_to_color[lvl]
                 legend_handles.append(
                     plt.Line2D([], [], marker="s", linestyle="",
                                markerfacecolor=col, markeredgecolor=col,

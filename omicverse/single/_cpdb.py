@@ -601,30 +601,18 @@ def cellphonedb_v5(adata,
             except Exception:
                 cache_path = Path(os.path.expanduser("~/.omicverse/data_lake/cellphonedb.zip"))
 
-            possible_paths = [
-                str(cache_path),
-                './cellphonedb.zip',
-                '~/cellphonedb.zip',
-                '/oak/stanford/groups/xiaojie/steorra/software/cellphonedb.zip',
-            ]
-
-            for path in possible_paths:
-                expanded_path = os.path.expanduser(path)
-                if os.path.exists(expanded_path):
-                    cpdb_file_path = expanded_path
-                    break
-
-            if cpdb_file_path is None:
-                if auto_download:
-                    print("   - CellPhoneDB DB not found locally; auto-downloading...")
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cpdb_file_path = download_cellphonedb_database(str(cache_path))
-                else:
-                    raise FileNotFoundError(
-                        "CellPhoneDB database not found. Pass cpdb_file_path=, "
-                        "set auto_download=True, or call "
-                        "ov.single.download_cellphonedb_database() first."
-                    )
+            if cache_path.exists():
+                cpdb_file_path = str(cache_path)
+            elif auto_download:
+                print("   - CellPhoneDB DB not found locally; auto-downloading...")
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cpdb_file_path = download_cellphonedb_database(str(cache_path))
+            else:
+                raise FileNotFoundError(
+                    "CellPhoneDB database not found. Pass cpdb_file_path=, "
+                    "set auto_download=True, or call "
+                    "ov.single.download_cellphonedb_database() first."
+                )
         
         print(f"   - Using CellPhoneDB database: {cpdb_file_path}")
         
@@ -817,7 +805,7 @@ def create_cellchatviz_from_cpdb(cpdb_results, separator='|', palette=None):
     auto_fix='none',
     examples=[
         'ov.single.download_cellphonedb_database()',
-        'ov.single.download_cellphonedb_database("/scratch/foo/cellphonedb.zip")',
+        'ov.single.download_cellphonedb_database("./cellphonedb.zip")',
     ],
     related=['single.cellphonedb_v5', 'single.validate_cpdb_database']
 )

@@ -364,20 +364,14 @@ def get_spec_chrom_csv(path=None):
     Get the species to chrom csv file
     """
     if path is None:
-        # Try to find the CSV file in common locations
-        possible_paths = [
-            "/dfs/project/cross-species/yanay/code/all_to_chrom_pos.csv",  # Original default
-            "./all_to_chrom_pos.csv",
-            Path.cwd() / "all_to_chrom_pos.csv",
-        ]
-        
-        for possible_path in possible_paths:
-            if Path(possible_path).exists():
-                path = possible_path
-                break
-        
-        if path is None:
-            raise FileNotFoundError("Could not find all_to_chrom_pos.csv file in any expected location")
+        cwd_csv = Path.cwd() / "all_to_chrom_pos.csv"
+        if cwd_csv.exists():
+            path = str(cwd_csv)
+        else:
+            raise FileNotFoundError(
+                "all_to_chrom_pos.csv not found in current directory. Pass an "
+                "explicit path= or place the file at ./all_to_chrom_pos.csv."
+            )
     
     gene_to_chrom_pos = pd.read_csv(path)
     gene_to_chrom_pos["spec_chrom"] = pd.Categorical(gene_to_chrom_pos["species"] + "_" +  gene_to_chrom_pos["chromosome"]) # add the spec_chrom list

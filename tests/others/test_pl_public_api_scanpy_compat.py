@@ -125,6 +125,28 @@ def test_public_embedding_density_smoke(toy_adata):
     assert "temp_density" in toy_adata.obs
 
 
+def test_public_branch_streamplot_smoke():
+    x = np.linspace(0.0, 1.0, 64)
+    branches = [
+        {
+            "center": np.zeros_like(x),
+            "layers": [("A", np.exp(-((x - 0.25) ** 2) / 0.01))],
+        },
+        {
+            "center": 0.35 / (1.0 + np.exp(-(x - 0.55) * 10.0)),
+            "layers": [("B", np.exp(-((x - 0.72) ** 2) / 0.02))],
+        },
+    ]
+    fig, ax = ov.pl.branch_streamplot(
+        x,
+        branches,
+        label_positions={"A": (0.22, 0.02, 12), "B": (0.76, 0.25, 12)},
+        show=False,
+    )
+    assert fig is not None
+    assert ax is not None
+
+
 def test_public_violin_old_smoke(toy_adata):
     fig, ax = plt.subplots()
     ov.pl.violin_old(

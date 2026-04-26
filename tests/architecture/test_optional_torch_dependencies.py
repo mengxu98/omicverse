@@ -196,6 +196,8 @@ def _install_single_dependency_stubs():
             "run_cellphonedb_v5": object(),
             "format_cpdb_results": object(),
             "format_cpdb_results_for_viz": object(),
+            "download_cellphonedb_database": object(),
+            "validate_cpdb_database": object(),
         },
         "omicverse.single._liana": {
             "run_liana": object(),

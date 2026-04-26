@@ -629,8 +629,6 @@ def dynamic_trends(
                 axis.set_title("" if panel_title is None else str(panel_title), fontsize=title_fontsize)
             axis.set_xlabel(xlabel)
             axis.set_ylabel(ylabel)
-            axis.spines["top"].set_visible(False)
-            axis.spines["right"].set_visible(False)
             axis.grid(add_grid, alpha=grid_alpha, linewidth=grid_linewidth)
             drawn, outside_layout = _draw_legend(
                 axis,
@@ -652,8 +650,6 @@ def dynamic_trends(
             axis.set_title("" if title is None else str(title))
         else:
             axis.set_title("" if title is None else str(title), fontsize=title_fontsize)
-        axis.spines["top"].set_visible(False)
-        axis.spines["right"].set_visible(False)
         axis.grid(add_grid, alpha=grid_alpha, linewidth=grid_linewidth)
         drawn, outside_layout = _draw_legend(
             axis,

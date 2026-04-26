@@ -928,14 +928,18 @@ def _prepare_dynamic_matrix(
         if lineage_key is None:
             meta = meta.sort_values([pseudotime_key], kind="stable")
             expr = expr.loc[meta.index]
+            metadata_dict = {
+                "cell": list(meta.index),
+                "pseudotime": pd.to_numeric(
+                    meta[pseudotime_key], errors="coerce"
+                ).to_numpy(),
+            }
+            if annotation_keys is not None:
+                for key in annotation_keys:
+                    metadata_dict[key] = meta[key].to_numpy()
             matrix = expr.T
             metadata = pd.DataFrame(
-                {
-                    "cell": list(meta.index),
-                    "pseudotime": pd.to_numeric(
-                        meta[pseudotime_key], errors="coerce"
-                    ).to_numpy(),
-                },
+                metadata_dict,
                 index=meta.index.astype(str),
             )
             matrix.columns = metadata.index
@@ -2394,13 +2398,19 @@ def dynamic_heatmap(
     gene_groups = None
     gene_colors = None
     if grouped_var_names is not None:
-        gene_groups = []
+        gene_to_group = {}
         for group, genes in grouped_var_names.items():
-            gene_groups.extend(
-                [group] * len([gene for gene in genes if gene in matrix.index])
-            )
+            for gene in genes:
+                if gene in matrix.index and gene not in gene_to_group:
+                    gene_to_group[gene] = group
+        gene_groups = [gene_to_group.get(gene) for gene in matrix.index]
+        if any(group is None for group in gene_groups):
+            gene_groups = None
         if gene_groups:
-            group_order = list(dict.fromkeys(gene_groups))
+            present_groups = set(gene_groups)
+            group_order = [
+                group for group in grouped_var_names.keys() if group in present_groups
+            ]
             gene_colors = None
             if annotation_keys is not None:
                 for key in annotation_keys:

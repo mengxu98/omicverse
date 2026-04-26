@@ -1,27 +1,31 @@
-"""Regression test for issue #683.
+"""Regression tests for ``ov.pp.tsne`` (issue #683).
 
-Calling ``ov.pp.tsne(adata, use_rep='scaled|original|X_pca')`` blew up
-with ``TypeError: tsne() got an unexpected keyword argument
-'n_components'`` because the wrapper unconditionally forwarded
-``n_components=2`` to ``scanpy.tl.tsne``, which does not accept it.
+The original bug: ``ov.pp.tsne`` forwarded ``n_components=2`` to
+``scanpy.tl.tsne`` which doesn't accept it and raised TypeError on
+scanpy ≥ 1.10.
 
-These tests pin three things:
+The fix went one step further: the cpu code path was rewritten to
+talk directly to ``sklearn.manifold.TSNE`` via a small in-tree wrapper
+(``omicverse.pp._tsne_cpu.tsne_cpu``), removing the dependency on
+``scanpy.tl.tsne`` altogether. CPU users now get full k-D t-SNE the
+same as the torch / RAPIDS backends.
 
-1. ``ov.pp.tsne(...)`` on the default cpu (scanpy) backend no longer
-   propagates ``n_components`` to ``sc.tl.tsne``.
-2. Asking for ``n_components != 2`` on the cpu backend raises a clear
-   ``ValueError`` (instead of the inscrutable scanpy TypeError) and
-   directs the user to the torch / RAPIDS backends that actually
-   support multi-dimensional t-SNE.
-3. The non-scanpy code paths (``cpu-gpu-mixed``, ``gpu``) still
-   receive ``n_components`` so they can produce 3-D / k-D t-SNE.
+These tests pin:
 
-We exercise the wrapper itself (no real scanpy run) by stubbing
-``sc.tl.tsne`` etc. — the bug is purely in argument forwarding.
+1. ``ov.pp.tsne(adata, use_rep='X_pca')`` (the literal user repro)
+   succeeds on cpu mode and produces a 2-D embedding.
+2. ``ov.pp.tsne(adata, n_components=3, ...)`` succeeds on cpu mode
+   and produces a 3-D embedding.
+3. ``scanpy.tl.tsne`` is not called on the cpu code path — the bug
+   would re-appear if a regression accidentally re-introduced it.
+4. The ``cpu-gpu-mixed`` (torch) backend still receives
+   ``n_components`` so its k-D support survives the refactor.
+5. The standalone helper ``omicverse.pp._tsne_cpu.tsne_cpu`` is a
+   real function that writes ``adata.obsm['X_tsne']`` /
+   ``adata.uns['tsne']`` in the canonical scanpy layout.
 """
 from __future__ import annotations
 
-import inspect
 from unittest.mock import patch
 
 import numpy as np
@@ -29,8 +33,8 @@ import pytest
 from anndata import AnnData
 
 
-def _make_pca_adata(n: int = 60, n_pcs: int = 8, seed: int = 0) -> AnnData:
-    """A minimal AnnData with X_pca already populated."""
+def _make_pca_adata(n: int = 60, n_pcs: int = 10, seed: int = 0) -> AnnData:
+    """Minimal AnnData with X_pca already populated."""
     rng = np.random.default_rng(seed)
     X = rng.standard_normal((n, 12)).astype(np.float32)
     adata = AnnData(X=X)
@@ -38,71 +42,81 @@ def _make_pca_adata(n: int = 60, n_pcs: int = 8, seed: int = 0) -> AnnData:
     return adata
 
 
-def test_cpu_tsne_does_not_forward_n_components_to_scanpy() -> None:
-    """The bug: ``ov.pp.tsne`` forwarded ``n_components`` to
-    ``sc.tl.tsne`` which raises TypeError. After the fix, the cpu code
-    path must NOT pass ``n_components`` through."""
-    import scanpy as sc
+# --------------------------------------------------------------------------- #
+# 1. CPU mode no longer goes through scanpy at all
+# --------------------------------------------------------------------------- #
+
+def test_cpu_tsne_does_not_call_scanpy() -> None:
     import omicverse as ov
     from omicverse import settings
 
-    # Capture the real scanpy signature BEFORE patching, so we can
-    # cross-check that every kw we forward is a real scanpy parameter.
-    real_sc_params = set(inspect.signature(sc.tl.tsne).parameters)
-
     adata = _make_pca_adata()
-    captured: dict = {}
-
-    def fake_sc_tsne(adata, **kw):
-        captured["kw"] = kw
-        return None
 
     prev_mode = settings.mode
     settings.mode = "cpu"
     try:
-        with patch("scanpy.tl.tsne", side_effect=fake_sc_tsne):
+        with patch("scanpy.tl.tsne") as patched_scanpy:
             ov.pp.tsne(adata, use_rep="X_pca")
-    finally:
-        settings.mode = prev_mode
-
-    assert "n_components" not in captured["kw"], (
-        "ov.pp.tsne should not forward n_components to scanpy.tl.tsne; "
-        f"actually forwarded: {sorted(captured['kw'])}"
-    )
-    # Every forwarded kwarg must be a real scanpy parameter.
-    unknown = set(captured["kw"]) - real_sc_params
-    assert not unknown, (
-        f"ov.pp.tsne forwarded unknown kwargs to scanpy.tl.tsne: {unknown}"
-    )
-
-
-def test_cpu_tsne_with_3d_request_raises_clear_error() -> None:
-    """``settings.mode='cpu'`` is scanpy-only, which is 2-D-only.
-    Asking for 3-D must raise a helpful ValueError (not let scanpy
-    explode with a TypeError later)."""
-    import omicverse as ov
-    from omicverse import settings
-
-    adata = _make_pca_adata()
-
-    prev_mode = settings.mode
-    settings.mode = "cpu"
-    try:
-        with patch("scanpy.tl.tsne") as patched:
-            with pytest.raises(ValueError, match=r"n_components=3"):
-                ov.pp.tsne(adata, n_components=3, use_rep="X_pca")
-        # The error must fire BEFORE scanpy is called.
-        assert not patched.called, (
-            "ov.pp.tsne should reject n_components!=2 on cpu mode "
-            "before invoking scanpy"
+        assert not patched_scanpy.called, (
+            "ov.pp.tsne(cpu mode) must not delegate to scanpy.tl.tsne anymore "
+            "(issue #683 follow-up: cpu path goes direct to sklearn)."
         )
     finally:
         settings.mode = prev_mode
 
 
+# --------------------------------------------------------------------------- #
+# 2. CPU mode: 2-D end-to-end smoke (the literal user repro)
+# --------------------------------------------------------------------------- #
+
+def test_cpu_tsne_2d_end_to_end() -> None:
+    import omicverse as ov
+    from omicverse import settings
+
+    adata = _make_pca_adata()
+
+    prev_mode = settings.mode
+    settings.mode = "cpu"
+    try:
+        ov.pp.tsne(adata, use_rep="X_pca")
+    finally:
+        settings.mode = prev_mode
+
+    assert "X_tsne" in adata.obsm
+    assert adata.obsm["X_tsne"].shape == (adata.n_obs, 2)
+    # The canonical params dict that downstream plot helpers consult.
+    assert "tsne" in adata.uns
+    assert "params" in adata.uns["tsne"]
+
+
+# --------------------------------------------------------------------------- #
+# 3. CPU mode: 3-D produces the requested dimensionality
+# --------------------------------------------------------------------------- #
+
+def test_cpu_tsne_3d_end_to_end() -> None:
+    import omicverse as ov
+    from omicverse import settings
+
+    adata = _make_pca_adata()
+
+    prev_mode = settings.mode
+    settings.mode = "cpu"
+    try:
+        ov.pp.tsne(adata, n_components=3, use_rep="X_pca")
+    finally:
+        settings.mode = prev_mode
+
+    assert adata.obsm["X_tsne"].shape == (adata.n_obs, 3), (
+        f"Expected 3-D embedding (n_components=3); got "
+        f"{adata.obsm['X_tsne'].shape}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 4. CPU-GPU-MIXED still routes n_components to the torch backend
+# --------------------------------------------------------------------------- #
+
 def test_cpu_gpu_mixed_tsne_does_forward_n_components() -> None:
-    """The torch backend supports k-D t-SNE — n_components must reach
-    it."""
     import omicverse as ov
     from omicverse import settings
 
@@ -115,7 +129,6 @@ def test_cpu_gpu_mixed_tsne_does_forward_n_components() -> None:
     prev_mode = settings.mode
     settings.mode = "cpu-gpu-mixed"
     try:
-        # Patch the lazily-imported helper.
         with patch("omicverse.pp._tsne.tsne", side_effect=fake_torch_tsne):
             ov.pp.tsne(adata, n_components=3, use_rep="X_pca")
     finally:
@@ -125,3 +138,31 @@ def test_cpu_gpu_mixed_tsne_does_forward_n_components() -> None:
         "ov.pp.tsne(cpu-gpu-mixed) must forward n_components to the "
         f"torch backend; got: {captured['kw']}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 5. The in-tree sklearn wrapper itself
+# --------------------------------------------------------------------------- #
+
+def test_tsne_cpu_helper_writes_canonical_layout() -> None:
+    """``ov.pp._tsne_cpu.tsne_cpu`` must write the canonical scanpy
+    storage layout (``obsm['X_tsne']`` + ``uns['tsne']['params']``)."""
+    from omicverse.pp._tsne_cpu import tsne_cpu
+
+    adata = _make_pca_adata()
+    tsne_cpu(adata, use_rep="X_pca", n_components=2)
+
+    assert "X_tsne" in adata.obsm
+    assert adata.obsm["X_tsne"].shape == (adata.n_obs, 2)
+    params = adata.uns["tsne"]["params"]
+    assert params["n_components"] == 2
+    assert params["use_rep"] == "X_pca"
+
+
+def test_tsne_cpu_helper_supports_3d() -> None:
+    from omicverse.pp._tsne_cpu import tsne_cpu
+
+    adata = _make_pca_adata()
+    tsne_cpu(adata, use_rep="X_pca", n_components=3)
+    assert adata.obsm["X_tsne"].shape == (adata.n_obs, 3)
+    assert adata.uns["tsne"]["params"]["n_components"] == 3

@@ -463,6 +463,19 @@ def handle_search_functions(ctx: "AgentContext", query: str) -> str:
 
         entry_text = f"  {fname}({sig})\n    {desc}"
 
+        # Append the full docstring after the description. A signature line
+        # only shows parameter defaults (e.g. ``doublets_method='scdblfinder'``)
+        # and hides the *valid values* the parameter accepts — the dispatch
+        # information lives in prose ("Options are 'scrublet', 'sccomposite',
+        # 'doubletfinder', 'scdblfinder'") inside the docstring. Surface it.
+        docstring = (m.get("docstring") or "").strip()
+        if docstring:
+            # No truncation: dispatch-parameter prose ("Options are ...")
+            # often lives mid-docstring, and the caller (an agent or
+            # human) deserves the full text. Indented for readability.
+            indented = docstring.replace("\n", "\n      ")
+            entry_text += f"\n    Docstring:\n      {indented}"
+
         branch_parameter = m.get("branch_parameter")
         branch_value = m.get("branch_value")
         if branch_parameter and branch_value:
@@ -506,10 +519,16 @@ def handle_search_functions(ctx: "AgentContext", query: str) -> str:
         if len(results) >= 10:
             break
 
-    return (
-        f"Found {len(results)} matching functions:\n"
-        + "\n".join(results)
-    )
+    # Visually separate top-N entries with a horizontal rule + index, so
+    # multi-entry results (each potentially carrying a full docstring) stay
+    # readable instead of bleeding into each other.
+    n = len(results)
+    divider = "  " + "─" * 76
+    blocks: list[str] = []
+    for i, entry in enumerate(results, start=1):
+        blocks.append(f"{divider}\n  [match {i}/{n}]\n{entry}")
+    blocks.append(divider)
+    return f"Found {n} matching functions:\n" + "\n".join(blocks)
 
 
 # ------------------------------------------------------------------

@@ -447,7 +447,6 @@ def pathway_enrichment(adata, pathways_dict,organism='Human',group_by='louvain',
     
     if pvalue_type=='adjust':
         enrich_res=df[df['Adjusted P-value']<cutoff]
-        # base 10 to match the colour-bar label '−Log10(P_adjusted)' (issue #685)
         enrich_res['logp']=-np.log10(enrich_res['Adjusted P-value'])
     else:
         enrich_res=df[df['P-value']<cutoff]

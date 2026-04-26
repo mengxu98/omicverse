@@ -2107,7 +2107,9 @@ def tsne(
     (see ``omicverse/external/torch_tsne.py``) — no ``torchdr`` dependency.
     """
     kwargs.setdefault("n_pcs", n_pcs)
-    kwargs.setdefault("n_components", n_components)
+    # Note: ``n_components`` is NOT forwarded unconditionally — scanpy's
+    # ``sc.tl.tsne`` does not accept it and raises TypeError (issue #683).
+    # We inject it per-backend below where the backend supports it.
     if use_rep is not None:
         kwargs.setdefault("use_rep", use_rep)
     kwargs.setdefault("perplexity", perplexity)
@@ -2121,11 +2123,21 @@ def tsne(
     if n_iter is not None:
         kwargs.setdefault("n_iter", n_iter)
     if settings.mode == 'cpu':
+        # scanpy.tl.tsne is 2-D only; raise instead of silently dropping
+        # the user's request for a higher-dimensional t-SNE.
+        if n_components != 2:
+            raise ValueError(
+                f"settings.mode='cpu' uses scanpy.tl.tsne which only produces "
+                f"a 2-D t-SNE; got n_components={n_components}. Switch to "
+                f"ov.settings.mode='cpu-gpu-mixed' (torch backend) or 'gpu' "
+                f"(RAPIDS) to compute t-SNE in {n_components} dimensions."
+            )
         print(f"{EMOJI['cpu']} Using Scanpy CPU t-SNE...")
         sc.tl.tsne(adata, **kwargs)
         add_reference(adata, 'tsne', 't-SNE with scanpy')
         note(backend=f"omicverse({settings.mode}) · scanpy")
     elif settings.mode == 'cpu-gpu-mixed':
+        kwargs.setdefault("n_components", n_components)
         print(f"{EMOJI['mixed']} Using torch CPU/GPU mixed mode to calculate t-SNE...")
         print_gpu_usage_color()
         from ._tsne import tsne as _tsne
@@ -2133,6 +2145,7 @@ def tsne(
         add_reference(adata, 'tsne', 't-SNE with omicverse')
         note(backend=f"omicverse({settings.mode}) · torch")
     else:
+        kwargs.setdefault("n_components", n_components)
         print(f"{EMOJI['gpu']} Using RAPIDS GPU to calculate t-SNE...")
         import rapids_singlecell as rsc
         rsc.tl.tsne(adata, **kwargs)

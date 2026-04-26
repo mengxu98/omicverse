@@ -546,6 +546,15 @@ class MMvec:
     # fit
     # ------------------------------------------------------------------
 
+    @register_function(
+        aliases=["MMvec.fit", "mmvec_fit", "fit_mmvec"],
+        category="microbiome",
+        description="Train MMvec on paired microbe / metabolite count tables; returns self with U_/V_/beta_/best_epoch_ populated.",
+        examples=[
+            "mmvec = ov.micro.MMvec(n_latent=3, epochs=600, val_frac=0.15).fit(adata_microbe, adata_metabolite)",
+        ],
+        related=["micro.MMvec", "micro.MMvec.cooccurrence", "micro.MMvec.conditional_probabilities"],
+    )
     def fit(
         self,
         adata_microbe: "ad.AnnData",
@@ -693,6 +702,13 @@ class MMvec:
         return pd.DataFrame(self.V_, index=self.metabolite_names_,
                             columns=[f"K{i+1}" for i in range(self.n_latent)])
 
+    @register_function(
+        aliases=["MMvec.cooccurrence", "mmvec_cooccurrence", "cooccurrence_matrix"],
+        category="microbiome",
+        description="Symmetric microbe × metabolite log-odds matrix U · Vᵀ; signed scores (use top_pairs to rank by |score|).",
+        examples=["co = mmvec.cooccurrence()"],
+        related=["micro.MMvec", "micro.MMvec.top_pairs", "micro.MMvec.conditional_probabilities"],
+    )
     def cooccurrence(self) -> pd.DataFrame:
         """Raw log-odds co-occurrence matrix ``U · Vᵀ`` (microbes × metabolites).
 
@@ -710,6 +726,13 @@ class MMvec:
                             index=self.microbe_names_,
                             columns=self.metabolite_names_)
 
+    @register_function(
+        aliases=["MMvec.conditional_probabilities", "mmvec_p_metabolite_given_microbe"],
+        category="microbiome",
+        description="Per-microbe softmax P(metabolite | microbe) — rows sum to 1; the canonical MMvec output.",
+        examples=["P = mmvec.conditional_probabilities(); P.loc['<microbe>'].sort_values(ascending=False).head(10)"],
+        related=["micro.MMvec", "micro.MMvec.cooccurrence", "micro.MMvec.top_pairs"],
+    )
     def conditional_probabilities(self) -> pd.DataFrame:
         """Per-microbe P(metabolite | microbe) — softmax of ``U @ V.T + β``.
 
@@ -729,6 +752,13 @@ class MMvec:
                             index=self.microbe_names_,
                             columns=self.metabolite_names_)
 
+    @register_function(
+        aliases=["MMvec.top_pairs", "mmvec_top_pairs"],
+        category="microbiome",
+        description="Top-N (microbe, metabolite) pairs by |log-odds|; sign preserved on the score column for direction.",
+        examples=["mmvec.top_pairs(n=20)"],
+        related=["micro.MMvec", "micro.MMvec.cooccurrence"],
+    )
     def top_pairs(self, n: int = 20) -> pd.DataFrame:
         """Top-``n`` (microbe, metabolite) pairs ranked by ``|log-odds|``.
 
@@ -756,6 +786,13 @@ def _cooccurrence_weights(X_mb: np.ndarray, X_mt: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+@register_function(
+    aliases=["plot_mmvec_training", "mmvec_training_curve"],
+    category="microbiome",
+    description="MMvec training + validation loss curve with the best-validation epoch marked.",
+    examples=["ov.micro.plot_mmvec_training(mmvec)"],
+    related=["micro.MMvec", "micro.MMvec.fit"],
+)
 def plot_mmvec_training(
     mmvec: "MMvec",
     ax: Optional[Any] = None,
@@ -871,6 +908,13 @@ def plot_cooccurrence(
     return ax
 
 
+@register_function(
+    aliases=["plot_embedding_biplot", "mmvec_biplot", "mmvec_embedding_biplot"],
+    category="microbiome",
+    description="MMvec joint microbe + metabolite latent-space biplot; annotates label_top items farthest from origin in each cloud.",
+    examples=["ov.micro.plot_embedding_biplot(mmvec, components=(0, 1), label_top=8)"],
+    related=["micro.MMvec", "micro.MMvec.fit"],
+)
 def plot_embedding_biplot(
     mmvec: "MMvec",
     components: Tuple[int, int] = (0, 1),

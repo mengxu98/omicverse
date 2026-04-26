@@ -36,7 +36,27 @@ from . import _qc as _qc_mod
 from . import _stats as _stats_mod
 from . import _transform as _tf
 
+from .._registry import register_function
 
+
+@register_function(
+    aliases=['pyMetabo', 'metabolomics_pipeline', '代谢组学流水线'],
+    category='metabolomics',
+    description='AnnData-native lifecycle class for metabolomics QC + stats; '
+                'chainable impute / normalize / transform / differential / '
+                'plsda / opls_da on a single seeded pipeline.',
+    examples=[
+        "m = ov.metabol.pyMetabo(adata)"
+        ".impute(method='qrilc').normalize(method='pqn')"
+        ".transform(method='log').differential(group_col='group',"
+        " group_a='case', group_b='ctrl', log_transformed=True)",
+    ],
+    related=[
+        'metabol.read_metaboanalyst', 'metabol.impute', 'metabol.normalize',
+        'metabol.transform', 'metabol.differential', 'metabol.plsda',
+        'metabol.opls_da',
+    ],
+)
 @dataclass
 class pyMetabo:
     """Lifecycle class for a metabolomics analysis.
@@ -62,6 +82,13 @@ class pyMetabo:
     # ------------------------------------------------------------------
     # preprocessing stages
     # ------------------------------------------------------------------
+    @register_function(
+        aliases=['pyMetabo.cv_filter', 'pymetabo_cv_filter'],
+        category='metabolomics',
+        description='pyMetabo chainable: drop features with QC coefficient-of-variation above cv_threshold.',
+        examples=["m.cv_filter(qc_mask=qc_bool, cv_threshold=0.30)"],
+        related=['metabol.cv_filter', 'metabol.pyMetabo'],
+    )
     def cv_filter(self, *, qc_mask, cv_threshold: float = 0.30) -> "pyMetabo":
         """Drop features with QC coefficient-of-variation above ``cv_threshold``.
 
@@ -75,6 +102,13 @@ class pyMetabo:
                                        cv_threshold=cv_threshold)
         return self
 
+    @register_function(
+        aliases=['pyMetabo.drift_correct', 'pymetabo_drift_correct'],
+        category='metabolomics',
+        description='pyMetabo chainable: correct injection-order drift via LOESS on QC samples.',
+        examples=["m.drift_correct(injection_order='order', qc_mask=qc_bool, frac=0.5)"],
+        related=['metabol.drift_correct', 'metabol.pyMetabo'],
+    )
     def drift_correct(self, *, injection_order, qc_mask, frac: float = 0.5) -> "pyMetabo":
         """Correct injection-order drift via LOESS regression on QC samples.
 
@@ -88,6 +122,13 @@ class pyMetabo:
         )
         return self
 
+    @register_function(
+        aliases=['pyMetabo.blank_filter', 'pymetabo_blank_filter'],
+        category='metabolomics',
+        description='pyMetabo chainable: drop features whose mean signal is not ratio× the blank mean (LC-MS contaminant pruning).',
+        examples=["m.blank_filter(blank_mask=blank_bool, ratio=3.0)"],
+        related=['metabol.blank_filter', 'metabol.pyMetabo'],
+    )
     def blank_filter(self, *, blank_mask, ratio: float = 3.0) -> "pyMetabo":
         """Drop features whose mean signal isn't ``ratio``× the blank mean.
 
@@ -98,6 +139,13 @@ class pyMetabo:
         self.adata = _qc_mod.blank_filter(self.adata, blank_mask=blank_mask, ratio=ratio)
         return self
 
+    @register_function(
+        aliases=['pyMetabo.impute', 'pymetabo_impute'],
+        category='metabolomics',
+        description='pyMetabo chainable: impute missing values; method qrilc (MNAR) / knn (MAR) / half_min / zero.',
+        examples=["m.impute(method='qrilc', seed=0)"],
+        related=['metabol.impute', 'metabol.pyMetabo'],
+    )
     def impute(self, *, method: str = "qrilc", seed: Optional[int] = None,
                **kwargs) -> "pyMetabo":
         """Impute missing values in ``adata.X`` and return ``self``.
@@ -118,6 +166,13 @@ class pyMetabo:
         self.adata = _imp.impute(self.adata, method=method, seed=seed, **kwargs)
         return self
 
+    @register_function(
+        aliases=['pyMetabo.normalize', 'pymetabo_normalize'],
+        category='metabolomics',
+        description='pyMetabo chainable: per-sample normalization (PQN/TIC/median/MSTUS) — run after imputation, before transform.',
+        examples=["m.normalize(method='pqn')"],
+        related=['metabol.normalize', 'metabol.pyMetabo'],
+    )
     def normalize(self, *, method: str = "pqn", **kwargs) -> "pyMetabo":
         """Normalize each sample row to correct dilution and return ``self``.
 
@@ -130,6 +185,16 @@ class pyMetabo:
         self.adata = _norm.normalize(self.adata, method=method, **kwargs)
         return self
 
+    @register_function(
+        aliases=['pyMetabo.transform', 'pymetabo_transform'],
+        category='metabolomics',
+        description='pyMetabo chainable: feature-level transformation (log / glog / autoscale / pareto). Run log → pareto for univariate-then-multivariate flow.',
+        examples=[
+            "m.transform(method='log')",
+            "m.transform(method='pareto', stash_raw=False)",
+        ],
+        related=['metabol.transform', 'metabol.pyMetabo'],
+    )
     def transform(self, *, method: str = "log", **kwargs) -> "pyMetabo":
         """Apply a feature-level transformation and return ``self``.
 
@@ -145,6 +210,15 @@ class pyMetabo:
     # ------------------------------------------------------------------
     # analysis stages
     # ------------------------------------------------------------------
+    @register_function(
+        aliases=['pyMetabo.differential', 'pymetabo_differential'],
+        category='metabolomics',
+        description='pyMetabo chainable: two-group univariate test (welch_t / mannwhitney / paired_t); stores result on self.deg_table.',
+        examples=[
+            "m.differential(group_col='group', group_a='case', group_b='ctrl', method='welch_t', log_transformed=True)",
+        ],
+        related=['metabol.differential', 'metabol.pyMetabo'],
+    )
     def differential(
         self, *,
         group_col: str = "group", group_a: Optional[str] = None,
@@ -166,6 +240,13 @@ class pyMetabo:
         )
         return self
 
+    @register_function(
+        aliases=['pyMetabo.plsda', 'pymetabo_plsda'],
+        category='metabolomics',
+        description='pyMetabo chainable: fit PLS-DA on Pareto-scaled data; stores result on self.plsda_result.',
+        examples=["m.plsda(n_components=2, group_col='group')"],
+        related=['metabol.plsda', 'metabol.pyMetabo'],
+    )
     def plsda(self, *, n_components: int = 2, group_col: str = "group",
               group_a: Optional[str] = None, group_b: Optional[str] = None,
               scale: bool = False) -> "pyMetabo":
@@ -183,6 +264,13 @@ class pyMetabo:
         )
         return self
 
+    @register_function(
+        aliases=['pyMetabo.opls_da', 'pymetabo_opls_da'],
+        category='metabolomics',
+        description='pyMetabo chainable: fit OPLS-DA (one predictive + n_ortho orthogonal components); stores result on self.plsda_result.',
+        examples=["m.opls_da(n_ortho=1, group_col='group')"],
+        related=['metabol.opls_da', 'metabol.pyMetabo'],
+    )
     def opls_da(self, *, n_ortho: int = 1, group_col: str = "group",
                 group_a: Optional[str] = None, group_b: Optional[str] = None,
                 scale: bool = False) -> "pyMetabo":
@@ -203,6 +291,13 @@ class pyMetabo:
     # ------------------------------------------------------------------
     # convenience
     # ------------------------------------------------------------------
+    @register_function(
+        aliases=['pyMetabo.vip_table', 'pymetabo_vip'],
+        category='metabolomics',
+        description='pyMetabo accessor: VIP-sorted DataFrame after a PLS-DA / OPLS-DA fit; raises if neither has been called.',
+        examples=["m.vip_table().head(15)"],
+        related=['metabol.pyMetabo', 'metabol.vip_bar'],
+    )
     def vip_table(self) -> pd.DataFrame:
         """Return VIP scores per metabolite — requires a prior PLS-DA / OPLS-DA fit.
 
@@ -214,6 +309,13 @@ class pyMetabo:
             raise RuntimeError("call .plsda() or .opls_da() first")
         return self.plsda_result.to_vip_table(self.adata.var_names)
 
+    @register_function(
+        aliases=['pyMetabo.significant_metabolites', 'pymetabo_sig_metabolites'],
+        category='metabolomics',
+        description='pyMetabo accessor: subset of self.deg_table at padj < padj_thresh and |log2fc| >= log2fc_thresh.',
+        examples=["m.significant_metabolites(padj_thresh=0.10, log2fc_thresh=0.3)"],
+        related=['metabol.pyMetabo', 'metabol.differential', 'metabol.volcano'],
+    )
     def significant_metabolites(
         self, *, padj_thresh: float = 0.05, log2fc_thresh: float = 1.0
     ) -> pd.DataFrame:

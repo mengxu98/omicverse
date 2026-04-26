@@ -142,6 +142,13 @@ class Ordinate:
                             index=self.adata.obs_names,
                             columns=[f"NMDS{i+1}" for i in range(n)])
 
+    @register_function(
+        aliases=['Ordinate.proportion_explained', 'pcoa_variance_explained'],
+        category='microbiome',
+        description='Variance fractions per PCo axis from the most recent PCoA call (None if only NMDS has run).',
+        examples=["ord_ = ov.micro.Ordinate(adata).pcoa(n=3); pct = ord_.proportion_explained()"],
+        related=['micro.Ordinate', 'micro.Ordinate.pcoa'],
+    )
     def proportion_explained(self) -> Optional[np.ndarray]:
         """Eigenvalue proportions from the most recent PCoA call.
 

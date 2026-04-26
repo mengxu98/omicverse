@@ -6,6 +6,7 @@ from typing import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from .._registry import register_function
 from .._settings import Colors, EMOJI
@@ -33,6 +34,8 @@ def _default_colors() -> list[str]:
 
 def _resolve_palette(labels: Sequence[str], palette=None) -> dict[str, str]:
     if palette is None:
+        if len(labels) == 1:
+            return {labels[0]: "#3C5488"}
         colors = _default_colors()
         return {label: colors[i % len(colors)] for i, label in enumerate(labels)}
     if isinstance(palette, str):
@@ -54,6 +57,21 @@ def _resolve_linestyles(labels: Sequence[str], linestyles=None) -> dict[str, str
         return {label: linestyles[label] for label in labels}
     linestyles = list(linestyles)
     return {label: linestyles[i % len(linestyles)] for i, label in enumerate(labels)}
+
+
+def _resolve_named_plot_value(value, *keys):
+    if not isinstance(value, dict):
+        return value
+    normalized = {}
+    for key, item in value.items():
+        normalized[str(key)] = item
+    for key in keys:
+        if key is None:
+            continue
+        key = str(key)
+        if key in normalized:
+            return normalized[key]
+    return normalized.get("default")
 
 
 def _series_label(group_name: str, gene_name: str, compare_features: bool, compare_groups: bool) -> str:
@@ -80,25 +98,58 @@ def _default_panel_title(
     return panel_label
 
 
-def _draw_legend(axis, *, legend: bool, legend_outside: bool):
+def _draw_legend(
+    axis,
+    *,
+    legend: bool,
+    legend_outside: bool,
+    legend_loc: str | int | None,
+    legend_bbox_to_anchor: tuple | None,
+    legend_fontsize: float | str | None,
+    legend_ncol: int,
+):
     if not legend:
-        return False
+        return False, False
     handles, labels = axis.get_legend_handles_labels()
     if not labels:
-        return False
+        return False, False
     dedup = dict(zip(labels, handles))
-    if legend_outside:
-        axis.legend(
-            dedup.values(),
-            dedup.keys(),
-            frameon=False,
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            borderaxespad=0.0,
-        )
-    else:
-        axis.legend(dedup.values(), dedup.keys(), frameon=False)
-    return True
+    outside_layout = False
+
+    if legend_loc is None:
+        if legend_outside:
+            legend_loc = "center left"
+            legend_bbox_to_anchor = (1.02, 0.5) if legend_bbox_to_anchor is None else legend_bbox_to_anchor
+            outside_layout = True
+        else:
+            legend_loc = "best"
+    elif isinstance(legend_loc, str) and legend_loc in {"right margin", "right"}:
+        legend_loc = "center left"
+        legend_bbox_to_anchor = (1.02, 0.5) if legend_bbox_to_anchor is None else legend_bbox_to_anchor
+        outside_layout = True
+    elif legend_bbox_to_anchor is not None:
+        outside_layout = True
+
+    legend_kwargs = {
+        "frameon": False,
+        "loc": legend_loc,
+        "ncol": legend_ncol,
+    }
+    if legend_bbox_to_anchor is not None:
+        legend_kwargs["bbox_to_anchor"] = legend_bbox_to_anchor
+        legend_kwargs["borderaxespad"] = 0.0
+    if legend_fontsize is not None:
+        legend_kwargs["fontsize"] = legend_fontsize
+
+    axis.legend(dedup.values(), dedup.keys(), **legend_kwargs)
+    return True, outside_layout
+
+
+def _is_categorical(values: pd.Series) -> bool:
+    return isinstance(values.dtype, pd.CategoricalDtype) or \
+        pd.api.types.is_object_dtype(values.dtype) or \
+        pd.api.types.is_string_dtype(values.dtype) or \
+        pd.api.types.is_bool_dtype(values.dtype)
 
 
 @register_function(
@@ -122,6 +173,13 @@ def dynamic_trends(
     add_line: bool = True,
     add_interval: bool = True,
     add_point: bool = False,
+    point_color_by: str | None = None,
+    point_palette=None,
+    split_time: float | dict[str, float] | None = None,
+    shared_trunk: bool = False,
+    trunk_color: str = "#3C5488",
+    trunk_alpha: float = 0.25,
+    trunk_linewidth: float | None = None,
     line_palette=None,
     line_palcolor=None,
     line_style_by: str | None = None,
@@ -134,6 +192,10 @@ def dynamic_trends(
     linewidth: float = 2.0,
     legend: bool = True,
     legend_outside: bool = True,
+    legend_loc: str | int | None = None,
+    legend_bbox_to_anchor: tuple | None = None,
+    legend_fontsize: float | str | None = None,
+    legend_ncol: int = 1,
     sharey: bool = False,
     xlabel: str = "Pseudotime",
     ylabel: str = "Expression",
@@ -179,6 +241,34 @@ def dynamic_trends(
         Whether to overlay observed expression values. This requires that
         ``result`` was computed with :func:`ov.single.dynamic_features` using
         ``store_raw=True``.
+    point_color_by
+        Optional column in the stored raw point table used to color observed
+        points independently from the fitted line colors. This enables views
+        such as a single global trend line with points colored by ``State`` or
+        ``subtype``. Requires ``add_point=True`` and
+        ``ov.single.dynamic_features(..., store_raw=True, raw_obs_keys=[...])``.
+    point_palette
+        Optional palette used when ``point_color_by`` is categorical.
+    split_time
+        Optional pseudotime position used to render branch-aware comparisons.
+        When provided together with ``compare_groups=True``, each group trend
+        is clipped to ``pseudotime >= split_time``. This can be supplied as a
+        scalar applied to every panel, or as a mapping keyed by gene / panel
+        name with an optional ``'default'`` fallback.
+    shared_trunk
+        Whether to draw a shared pre-split trunk when ``split_time`` is
+        provided. The trunk is computed as the mean fitted curve across the
+        compared groups for each gene before the split point, giving a generic
+        branch-aware view that can be reused across Monocle, Slingshot,
+        Palantir, CellRank, and other trajectory methods.
+    trunk_color
+        Color used for the shared trunk line when ``shared_trunk=True`` and a
+        single feature is shown on a panel.
+    trunk_alpha
+        Alpha transparency used for the shared trunk confidence ribbon.
+    trunk_linewidth
+        Optional line width used for the shared trunk. Defaults to
+        ``linewidth`` when unset.
     line_palette
         Optional named matplotlib colormap or palette-like sequence describing
         line colors.
@@ -206,6 +296,18 @@ def dynamic_trends(
         Whether to draw a legend on each axis.
     legend_outside
         Whether to place the legend outside the plotting area on the right.
+        Kept for backward compatibility; prefer ``legend_loc`` in new code.
+    legend_loc
+        Legend location. Use ``'right margin'`` for the Scanpy/OmicVerse-style
+        outside-right legend, or any Matplotlib legend location such as
+        ``'best'`` or ``'upper center'``.
+    legend_bbox_to_anchor
+        Optional Matplotlib ``bbox_to_anchor`` used together with
+        ``legend_loc`` for precise placement.
+    legend_fontsize
+        Optional legend font size.
+    legend_ncol
+        Number of legend columns.
     sharey
         Whether subplots should share the y-axis in multi-gene layouts.
     xlabel
@@ -269,9 +371,27 @@ def dynamic_trends(
     raw = result.get_raw(genes=gene_list, datasets=groups) if add_point and hasattr(result, "get_raw") else None
     if add_point and raw is None:
         raise ValueError("`add_point=True` requires `ov.single.dynamic_features(..., store_raw=True)`.")
+    if point_color_by is not None and not add_point:
+        raise ValueError("`point_color_by` requires `add_point=True`.")
+    if point_color_by is not None:
+        if raw is None or point_color_by not in raw.columns:
+            raise KeyError(
+                f"`point_color_by={point_color_by!r}` was not found in the stored raw table. "
+                "Re-run `ov.single.dynamic_features(..., store_raw=True, raw_obs_keys=[...])`."
+            )
+        point_values = raw[point_color_by]
+        if not _is_categorical(point_values):
+            raise ValueError("`point_color_by` currently supports categorical raw obs columns only.")
+        point_labels = list(dict.fromkeys(point_values.dropna().astype(str)))
+        point_color_map = _resolve_palette(point_labels, palette=point_palette)
+    else:
+        point_labels = []
+        point_color_map = {}
 
     if line_style_by not in {None, "features", "groups"}:
         raise ValueError("`line_style_by` must be one of {None, 'features', 'groups'}.")
+    if split_time is not None and not compare_groups:
+        raise ValueError("`split_time` requires `compare_groups=True` so that branch-specific trends can be compared.")
 
     if compare_features and compare_groups:
         panel_mode = "combined"
@@ -337,6 +457,7 @@ def dynamic_trends(
         style_map = {}
 
     legend_drawn = False
+    legend_uses_outside_layout = False
 
     for idx, panel_label in enumerate(panel_labels):
         axis = axes[0] if panel_mode == "combined" else axes[idx]
@@ -353,10 +474,70 @@ def dynamic_trends(
         for gene in panel_genes:
             gene_fitted = fitted[fitted["gene"].astype(str) == gene]
             gene_raw = None if raw is None else raw[raw["gene"].astype(str) == gene]
+            panel_split_time = _resolve_named_plot_value(split_time, gene, panel_label)
+            if panel_split_time is not None:
+                panel_split_time = float(panel_split_time)
+            branch_mode = compare_groups and panel_split_time is not None
+
+            if shared_trunk and branch_mode and add_line:
+                trunk_parts = []
+                for group_name in panel_groups:
+                    trunk_fit = gene_fitted[
+                        gene_fitted["dataset"].astype(str) == group_name
+                    ].sort_values("pseudotime")
+                    trunk_fit = trunk_fit[trunk_fit["pseudotime"] <= panel_split_time]
+                    if not trunk_fit.empty:
+                        trunk_parts.append(
+                            trunk_fit[["pseudotime", "fitted", "lower", "upper"]].copy()
+                        )
+                if trunk_parts:
+                    trunk_df = pd.concat(trunk_parts, ignore_index=True)
+                    trunk_curve = (
+                        trunk_df.groupby("pseudotime", sort=True)[
+                            ["fitted", "lower", "upper"]
+                        ]
+                        .mean(numeric_only=True)
+                        .reset_index()
+                    )
+                    trunk_label = (
+                        f"trunk | {gene}"
+                        if compare_features and len(panel_genes) > 1
+                        else "trunk"
+                    )
+                    panel_trunk_color = (
+                        color_map[gene]
+                        if compare_features and len(panel_genes) > 1
+                        else trunk_color
+                    )
+                    axis.plot(
+                        trunk_curve["pseudotime"],
+                        trunk_curve["fitted"],
+                        color=panel_trunk_color,
+                        linewidth=linewidth if trunk_linewidth is None else trunk_linewidth,
+                        linestyle="-",
+                        label=trunk_label,
+                    )
+                    if (
+                        add_interval
+                        and trunk_curve["lower"].notna().any()
+                        and trunk_curve["upper"].notna().any()
+                    ):
+                        axis.fill_between(
+                            trunk_curve["pseudotime"].to_numpy(dtype=float),
+                            trunk_curve["lower"].to_numpy(dtype=float),
+                            trunk_curve["upper"].to_numpy(dtype=float),
+                            color=panel_trunk_color,
+                            alpha=trunk_alpha,
+                        )
+
             for group_name in panel_groups:
                 dataset_fit = gene_fitted[gene_fitted["dataset"].astype(str) == group_name].sort_values("pseudotime")
                 if dataset_fit.empty:
                     continue
+                if branch_mode:
+                    dataset_fit = dataset_fit[dataset_fit["pseudotime"] >= panel_split_time]
+                    if dataset_fit.empty:
+                        continue
                 if panel_mode == "combined":
                     color = color_map[group_name] if compare_groups else color_map[gene]
                 elif panel_mode == "groups":
@@ -376,18 +557,40 @@ def dynamic_trends(
                     label = gene
                 elif panel_mode == "features" and not compare_features:
                     label = group_name
+                if point_color_by is not None and len(group_list) == 1 and not compare_features and not compare_groups:
+                    label = "_nolegend_"
 
                 if add_point and gene_raw is not None:
                     dataset_raw = gene_raw[gene_raw["dataset"].astype(str) == group_name]
                     if not dataset_raw.empty:
-                        axis.scatter(
-                            dataset_raw["pseudotime"],
-                            dataset_raw["expression"],
-                            s=scatter_size,
-                            alpha=scatter_alpha,
-                            color=color,
-                            linewidths=0,
-                        )
+                        if branch_mode:
+                            dataset_raw = dataset_raw[dataset_raw["pseudotime"] >= panel_split_time]
+                        if dataset_raw.empty:
+                            pass
+                        elif point_color_by is None:
+                            axis.scatter(
+                                dataset_raw["pseudotime"],
+                                dataset_raw["expression"],
+                                s=scatter_size,
+                                alpha=scatter_alpha,
+                                color=color,
+                                linewidths=0,
+                            )
+                        else:
+                            point_series = dataset_raw[point_color_by]
+                            for point_label in list(dict.fromkeys(point_series.dropna().astype(str))):
+                                point_mask = point_series.astype(str).to_numpy() == point_label
+                                if not np.any(point_mask):
+                                    continue
+                                axis.scatter(
+                                    dataset_raw.loc[point_mask, "pseudotime"],
+                                    dataset_raw.loc[point_mask, "expression"],
+                                    s=scatter_size,
+                                    alpha=scatter_alpha,
+                                    color=point_color_map[point_label],
+                                    linewidths=0,
+                                    label=point_label,
+                                )
                 if add_line:
                     axis.plot(
                         dataset_fit["pseudotime"],
@@ -429,7 +632,17 @@ def dynamic_trends(
             axis.spines["top"].set_visible(False)
             axis.spines["right"].set_visible(False)
             axis.grid(add_grid, alpha=grid_alpha, linewidth=grid_linewidth)
-            legend_drawn = _draw_legend(axis, legend=legend, legend_outside=legend_outside) or legend_drawn
+            drawn, outside_layout = _draw_legend(
+                axis,
+                legend=legend,
+                legend_outside=legend_outside,
+                legend_loc=legend_loc,
+                legend_bbox_to_anchor=legend_bbox_to_anchor,
+                legend_fontsize=legend_fontsize,
+                legend_ncol=legend_ncol,
+            )
+            legend_drawn = drawn or legend_drawn
+            legend_uses_outside_layout = outside_layout or legend_uses_outside_layout
 
     if panel_mode == "combined":
         axis = axes[0]
@@ -442,12 +655,22 @@ def dynamic_trends(
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
         axis.grid(add_grid, alpha=grid_alpha, linewidth=grid_linewidth)
-        legend_drawn = _draw_legend(axis, legend=legend, legend_outside=legend_outside) or legend_drawn
+        drawn, outside_layout = _draw_legend(
+            axis,
+            legend=legend,
+            legend_outside=legend_outside,
+            legend_loc=legend_loc,
+            legend_bbox_to_anchor=legend_bbox_to_anchor,
+            legend_fontsize=legend_fontsize,
+            legend_ncol=legend_ncol,
+        )
+        legend_drawn = drawn or legend_drawn
+        legend_uses_outside_layout = outside_layout or legend_uses_outside_layout
 
     for axis in axes[len(panel_labels):]:
         axis.set_visible(False)
 
-    fig.tight_layout(rect=(0, 0, 0.84, 1) if legend_drawn and legend_outside else None)
+    fig.tight_layout(rect=(0, 0, 0.84, 1) if legend_drawn and legend_uses_outside_layout else None)
     axes_out = axes[0] if panel_mode == "combined" or len(panel_labels) == 1 else axes[: len(panel_labels)]
     if show is None:
         show = not return_fig and not return_axes

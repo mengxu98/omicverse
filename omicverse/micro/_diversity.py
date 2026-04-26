@@ -199,10 +199,39 @@ class Alpha:
                 self.adata.obs[col] = df[col].reindex(self.adata.obs_names).values
         return df
 
+    @register_function(
+        aliases=['Alpha.shannon', 'shannon_diversity', 'alpha_shannon'],
+        category='microbiome',
+        description='Per-sample Shannon entropy (richness × evenness); convenience wrapper that runs Alpha.run(["shannon"]).',
+        examples=["ov.micro.Alpha(adata, rarefy_depth=10000).shannon()"],
+        related=['micro.Alpha', 'micro.Alpha.run'],
+    )
     def shannon(self) -> pd.Series:
+        """Per-sample Shannon entropy.
+
+        Convenience wrapper for ``self.run('shannon')['shannon']``.
+        Higher values mean more even community composition (mathematical
+        max is ``log(n_taxa)``). Sensitive to rare taxa, so always rarefy
+        first if sequencing depths are unequal — otherwise samples with
+        more reads will appear "more diverse" purely from depth.
+        """
         return self.run("shannon")["shannon"]
 
+    @register_function(
+        aliases=['Alpha.observed', 'observed_otus', 'alpha_observed'],
+        category='microbiome',
+        description='Per-sample observed-OTU richness; depth-sensitive convenience wrapper around Alpha.run(["observed_otus"]).',
+        examples=["ov.micro.Alpha(adata, rarefy_depth=10000).observed()"],
+        related=['micro.Alpha', 'micro.Alpha.run'],
+    )
     def observed(self) -> pd.Series:
+        """Per-sample observed-OTU count.
+
+        Convenience wrapper for ``self.run('observed_otus')['observed_otus']``.
+        Number of distinct ASVs / OTUs with non-zero counts in each sample.
+        Strongly depth-dependent — always rarefy first or pair with a
+        depth-corrected metric (``chao1``, ``faith_pd``).
+        """
         return self.run("observed_otus")["observed_otus"]
 
 
@@ -345,5 +374,22 @@ class Beta:
             )
         return pd.DataFrame(dm_skbio.data, index=ids, columns=ids)
 
+    @register_function(
+        aliases=['Beta.braycurtis', 'braycurtis_distance', 'beta_braycurtis'],
+        category='microbiome',
+        description='Bray-Curtis dissimilarity matrix; default 16S beta metric, abundance-weighted; convenience wrapper around Beta.run(metric="braycurtis").',
+        examples=["ov.micro.Beta(adata, rarefy_depth=10000).braycurtis()"],
+        related=['micro.Beta', 'micro.Beta.run', 'micro.Ordinate'],
+    )
     def braycurtis(self, rarefy: bool = True) -> pd.DataFrame:
+        """Bray-Curtis dissimilarity matrix (samples × samples).
+
+        Convenience wrapper for ``self.run('braycurtis', rarefy=...)``.
+        Bray-Curtis is the de-facto default beta metric for 16S — it
+        weights species by abundance and ranges 0 (identical) to 1
+        (no shared taxa). When ``rarefy=True`` (the default), the
+        underlying count matrix is rarefied to a common depth before
+        the calculation; when ``False``, raw counts are used (sensible
+        only after CLR or proportion transforms).
+        """
         return self.run("braycurtis", rarefy=rarefy)

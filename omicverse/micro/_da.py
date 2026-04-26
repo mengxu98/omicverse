@@ -197,7 +197,37 @@ class DA:
         min_prevalence: float = 0.1,
         alpha: float = 0.05,
     ) -> pd.DataFrame:
-        """Differential abundance via pyDESeq2 (negative-binomial GLM)."""
+        """Differential abundance via pyDESeq2 (negative-binomial GLM).
+
+        Models raw integer counts directly with a NB GLM — no
+        prior CLR / log transform. Mature method from RNA-seq adapted
+        to microbiome composition; tends to be more conservative than
+        Wilcoxon and has explicit shrinkage of small-count log-fold-changes.
+        ANCOM-BC is closer to the compositional ground-truth but pyDESeq2
+        is faster and more widely cited.
+
+        Parameters
+        ----------
+        group_key : str
+            Column in ``adata.obs`` with the binary phenotype.
+        group_a, group_b : str, optional
+            Class labels; if omitted, the two alphabetically smallest
+            values in ``adata.obs[group_key]`` are used. Convention:
+            ``log2fc > 0`` ⇒ feature higher in ``group_a``.
+        rank : str, optional
+            Collapse counts to this taxonomic rank (``'genus'``,
+            ``'family'``, ...) before testing; ``None`` uses ASVs.
+        min_prevalence : float, default 0.1
+            Drop features present in fewer than this fraction of samples
+            before testing.
+        alpha : float, default 0.05
+            FDR threshold passed to pyDESeq2's `summary`.
+
+        Returns
+        -------
+        pd.DataFrame indexed by feature with columns ``baseMean``,
+        ``log2fc``, ``lfcSE``, ``stat``, ``pvalue``, ``padj``.
+        """
         try:
             from pydeseq2.dds import DeseqDataSet
             from pydeseq2.ds import DeseqStats

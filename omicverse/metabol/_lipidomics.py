@@ -41,7 +41,39 @@ from .._registry import register_function
 
 @dataclass
 class LipidIdentity:
-    """Parsed LIPID MAPS shorthand — the sum-composition level."""
+    """Parsed LIPID MAPS shorthand — the sum-composition level.
+
+    Captures the lipid class plus the sum of acyl-chain carbons and
+    double-bond count, which is the granularity most LC-MS lipidomics
+    surveys report (``"PC 34:1"`` rather than the species-resolved
+    ``"PC 16:0_18:1"``). Used by :func:`parse_lipid` and
+    :func:`annotate_lipids` to populate ``adata.var`` columns.
+
+    Attributes
+    ----------
+    lipid_class : str
+        Class abbreviation matched against the ``LIPID_CLASSES``
+        registry — e.g. ``"PC"``, ``"PE"``, ``"TAG"``, ``"Cer"``,
+        ``"SM"``, ``"LPC"``, ``"GlcCer"``.
+    total_carbons : int
+        Sum of acyl-chain carbons. For sphingolipids (``Cer``,
+        ``SM``, ``GlcCer``) this counts the sphingosine + N-acyl
+        carbons together; for glycerophospholipids it's the
+        sum of the sn-1 / sn-2 chains.
+    total_db : int
+        Total degree of unsaturation across all chains.
+    backbone : str or None
+        Sphingosine descriptor like ``"d18:1"`` for Cer / SM /
+        GlcCer; ``None`` for glycerophospholipids.
+    raw : str
+        The original input string (kept for round-trip /
+        debugging — re-parse may be lossy).
+
+    Convenience checks
+    ------------------
+    is_saturated() : returns True if ``total_db == 0``.
+    is_polyunsaturated(threshold=2) : True if ``total_db >= threshold``.
+    """
 
     lipid_class: str         # "PC", "TAG", "Cer", "SM", "LPC", ...
     total_carbons: int       # sum of acyl chain carbons (for Cer: sphingosine + N-acyl)
@@ -50,9 +82,11 @@ class LipidIdentity:
     raw: str = ""            # original string
 
     def is_saturated(self) -> bool:
+        """True if no double bonds — typical SFA-rich species."""
         return self.total_db == 0
 
     def is_polyunsaturated(self, threshold: int = 2) -> bool:
+        """True if degree of unsaturation ≥ ``threshold`` (default 2 — PUFA)."""
         return self.total_db >= threshold
 
 

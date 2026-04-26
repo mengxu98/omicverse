@@ -58,9 +58,12 @@ bind_optional_symbols(
 
 def __getattr__(name):
     if name in {"pyWGCNA", "readWGCNA"}:
-        from . import _Gene_module as gene_module
+        # `_wgcna` is the discoverable shim — same runtime behaviour as
+        # the upstream PyWGCNA class, but carries the @register_function
+        # metadata the scanner indexes (the scanner skips `external/`).
+        from . import _wgcna
 
-        return getattr(gene_module, name)
+        return getattr(_wgcna, name)
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 __all__ = [

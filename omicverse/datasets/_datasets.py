@@ -716,12 +716,17 @@ def pancreatic_endocrinogenesis(
     related=['datasets.pancreatic_endocrinogenesis', 'datasets.get_adata']
 )
 def pancreas_cellrank(
-    url: str = "https://figshare.com/ndownloader/files/25060877",
+    url: str = "https://github.com/theislab/scvelo_notebooks/raw/master/data/Pancreas/endocrinogenesis_day15.h5ad",
     filename: str = "pancreas_cellrank.h5ad",
 ) -> AnnData:
     """The pancreas cellrank dataset used in https://github.com/theislab/scvelo_notebooks/tree/master/data/Pancreas.
 
     This data consists of 13,913 genes across 2,930 cells.
+
+    Note: The previous figshare URL (files/25060877) returned a 2KB HTML error
+    page instead of the dataset, causing an infinite redownload loop.
+    Switched the default to the scvelo_notebooks GitHub raw URL, which is the
+    upstream source that scvelo / cellrank also use.
     """
     adata = get_adata(url, filename)
     return adata

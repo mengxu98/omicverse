@@ -136,7 +136,7 @@ class FilesystemContextManager:
         >>> relevant = ctx.get_relevant_context("dimensionality reduction")
     """
 
-    DEFAULT_BASE_DIR = Path.home() / ".ovagent" / "context"
+    DEFAULT_BASE_DIR = None  # resolved lazily via _ovagent_paths.ovagent_home()
     ENV_BASE_DIR = "OVAGENT_CONTEXT_DIR"
 
     # Categories for organizing notes
@@ -179,7 +179,8 @@ class FilesystemContextManager:
         elif env_base_dir:
             self.base_dir = Path(env_base_dir).expanduser()
         else:
-            self.base_dir = self.DEFAULT_BASE_DIR
+            from ._ovagent_paths import ovagent_home
+            self.base_dir = ovagent_home() / "context"
         self.session_id = session_id or self._generate_session_id()
         self.parent_session_id = parent_session_id
         self.max_notes_per_category = max_notes_per_category

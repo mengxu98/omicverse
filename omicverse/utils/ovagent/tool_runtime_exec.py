@@ -439,6 +439,22 @@ def handle_search_functions(ctx: "AgentContext", query: str) -> str:
     if not matches:
         return f"No functions found matching '{query}'. Try broader keywords."
 
+    # Live trace: surface registry ranking to the Reporter so users see what
+    # matched the query (top 10 by rank order returned by the registry).
+    try:
+        from ..agent_reporter import EventLevel as _EL
+        emit = getattr(ctx, "_emit", None)
+        if emit:
+            top = []
+            for i, m in enumerate(matches[:10]):
+                fname = m.get("full_name", m.get("short_name", "?"))
+                top.append(f"{i+1}. {fname}")
+            emit(_EL.INFO,
+                 f"🔎 search_functions(query={query!r}) → {len(matches)} matches; top: " + "; ".join(top),
+                 "registry_search")
+    except Exception:
+        pass
+
     results: List[str] = []
     for m in matches[:20]:
         fname = m.get("full_name", m.get("short_name", ""))

@@ -436,7 +436,7 @@ class RuntimeStateManager:
         output_root: Optional[Path] = None,
         max_output_chunks_per_task: int = 200,
     ) -> None:
-        self.output_root = Path(output_root or (Path.home() / ".ovagent" / "runtime_state"))
+        from .._ovagent_paths import ovagent_home as _oh; self.output_root = Path(output_root or (_oh() / "runtime_state"))
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.max_output_chunks_per_task = max_output_chunks_per_task
         self._states: dict[str, SessionRuntimeState] = {}

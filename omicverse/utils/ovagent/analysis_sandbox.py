@@ -668,15 +668,33 @@ def build_sandbox_globals(ctx: "AgentContext") -> Dict[str, Any]:
         "openpyxl", "reportlab", "matplotlib", "seaborn",
         "scipy", "statsmodels", "sklearn",
     )
+    # Warn once per missing module instead of on every execute_code call —
+    # reportlab/openpyxl/etc. are optional skill modules; their absence is
+    # not actionable and the noise drowns out real errors in the trace.
+    global _SANDBOX_MODULE_WARNED
+    try:
+        _SANDBOX_MODULE_WARNED
+    except NameError:
+        _SANDBOX_MODULE_WARNED = set()
     for module_name in core_modules + skill_modules:
         try:
             allowed_modules[module_name] = __import__(module_name)
         except ImportError:
-            warnings.warn(
-                f"Module '{module_name}' is not available inside the agent sandbox.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            if module_name not in _SANDBOX_MODULE_WARNED:
+                _SANDBOX_MODULE_WARNED.add(module_name)
+                # Demote optional skill modules to debug; only core is warning-worthy.
+                if module_name in core_modules:
+                    warnings.warn(
+                        f"Module '{module_name}' (core) is not available inside the agent sandbox.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    import logging as _lg
+                    _lg.getLogger(__name__).debug(
+                        "Optional sandbox module %r not installed (warned once); skipping.",
+                        module_name,
+                    )
 
     allowed_modules["os"] = SafeOsProxy()
 

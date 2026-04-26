@@ -494,7 +494,7 @@ def download_tosica_gmt():
     ],
     related=["bulk.geneset_enrichment", "utils.download_tosica_gmt", "single.pathway_enrichment"]
 )
-def geneset_prepare(geneset_path,organism='Human',):
+def geneset_prepare(geneset_path,organism='Human',auto_download=True):
     r"""Load and prepare gene sets from GMT/TXT files for enrichment analysis.
 
     Parameters
@@ -503,6 +503,12 @@ def geneset_prepare(geneset_path,organism='Human',):
         Path to geneset file.
     organism : str
         Organism name used for gene-symbol case normalization.
+    auto_download : bool, default=True
+        If the path does not exist AND its basename matches a known
+        omicverse pathway resource (``GO_*_2021``, ``Reactome_2022``,
+        ``WikiPathway_2021_Human``, ``WikiPathways_2019_Mouse``), call
+        :func:`download_pathway_database` to fetch all standard genesets
+        into ``./genesets/`` and retry. Disable to fail fast offline.
 
     Returns
     -------
@@ -511,6 +517,21 @@ def geneset_prepare(geneset_path,organism='Human',):
     """
     result_dict = {}
     file_path=geneset_path
+    if auto_download and not os.path.exists(file_path):
+        known = {
+            'GO_Biological_Process_2021', 'GO_Cellular_Component_2021',
+            'GO_Molecular_Function_2021', 'WikiPathway_2021_Human',
+            'WikiPathways_2019_Mouse', 'Reactome_2022',
+        }
+        stem = os.path.splitext(os.path.basename(file_path))[0]
+        if stem in known:
+            print(f"   - Geneset '{stem}' missing locally; auto-downloading "
+                  f"via ov.utils.download_pathway_database()...")
+            download_pathway_database()
+            # download_pathway_database writes to ./genesets/
+            cand = os.path.join('./genesets', f'{stem}.txt')
+            if os.path.exists(cand):
+                file_path = cand
     with open(file_path, 'r', encoding='utf-8') as file:
         for idx,line in enumerate(file):
             line = line.strip()

@@ -439,12 +439,13 @@ def cpdb2cellchat(df):
     return new_df
 
 
-def cellphonedb_v5(adata, 
+def cellphonedb_v5(adata,
                            celltype_key='celltype',
                            min_cell_fraction=0.005,
                            min_genes=200,
                            min_cells=3,
                            cpdb_file_path=None,
+                           auto_download=True,
                            iterations=1000,
                            threshold=0.1,
                            pvalue=0.05,
@@ -474,6 +475,12 @@ def cellphonedb_v5(adata,
         Minimum number of cells required per gene
     cpdb_file_path:str or None
         Path to CellPhoneDB database zip file. If None, will try to find automatically
+        (cache → ./cellphonedb.zip → ~/cellphonedb.zip), and auto-download if missing.
+    auto_download:bool, default=True
+        If True and the database is not found locally, automatically download
+        from the official CellPhoneDB GitHub release into
+        ``$OVAGENT_HOME/data_lake/cellphonedb.zip``. Disable to fail fast in
+        offline environments.
     iterations:int
         Number of shufflings performed in the analysis
     threshold:float
@@ -588,24 +595,36 @@ def cellphonedb_v5(adata,
         
         # Step 5: Find CellPhoneDB database if not provided
         if cpdb_file_path is None:
-            # Try common locations
+            try:
+                from ..utils._ovagent_paths import ovagent_home
+                cache_path = ovagent_home() / "data_lake" / "cellphonedb.zip"
+            except Exception:
+                cache_path = Path(os.path.expanduser("~/.omicverse/data_lake/cellphonedb.zip"))
+
             possible_paths = [
-                '/oak/stanford/groups/xiaojie/steorra/software/cellphonedb.zip',
+                str(cache_path),
                 './cellphonedb.zip',
-                '~/cellphonedb.zip'
+                '~/cellphonedb.zip',
+                '/oak/stanford/groups/xiaojie/steorra/software/cellphonedb.zip',
             ]
-            
+
             for path in possible_paths:
                 expanded_path = os.path.expanduser(path)
                 if os.path.exists(expanded_path):
                     cpdb_file_path = expanded_path
                     break
-            
+
             if cpdb_file_path is None:
-                raise FileNotFoundError(
-                    "CellPhoneDB database not found. Please provide cpdb_file_path or "
-                    "place cellphonedb.zip in current directory"
-                )
+                if auto_download:
+                    print("   - CellPhoneDB DB not found locally; auto-downloading...")
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cpdb_file_path = download_cellphonedb_database(str(cache_path))
+                else:
+                    raise FileNotFoundError(
+                        "CellPhoneDB database not found. Pass cpdb_file_path=, "
+                        "set auto_download=True, or call "
+                        "ov.single.download_cellphonedb_database() first."
+                    )
         
         print(f"   - Using CellPhoneDB database: {cpdb_file_path}")
         
@@ -779,14 +798,42 @@ def create_cellchatviz_from_cpdb(cpdb_results, separator='|', palette=None):
     return viz
 
 
+@register_function(
+    aliases=[
+        'CellPhoneDB 数据库下载', 'CellPhoneDB database download',
+        'download_cellphonedb_database', 'download_cellphonedb',
+        'cpdb download', 'fetch cellphonedb',
+    ],
+    category="single",
+    description=(
+        "Download the CellPhoneDB v5 ligand-receptor database (cellphonedb.zip) "
+        "from the official GitHub mirror. Required by ov.single.cellphonedb_v5 "
+        "before running cell-cell communication analysis. Caches under "
+        "$OVAGENT_HOME/data_lake/cellphonedb.zip and is idempotent."
+    ),
+    prerequisites={},
+    requires={},
+    produces={},
+    auto_fix='none',
+    examples=[
+        'ov.single.download_cellphonedb_database()',
+        'ov.single.download_cellphonedb_database("/scratch/foo/cellphonedb.zip")',
+    ],
+    related=['single.cellphonedb_v5', 'single.validate_cpdb_database']
+)
 def download_cellphonedb_database(download_path=None, force_download=False):
     """
-    Download CellPhoneDB database with fallback URLs
-    
+    Download CellPhoneDB database with fallback URLs.
+
+    Uses ``ov.datasets.download_data_requests`` (the standard omicverse
+    downloader, with realistic User-Agent + tqdm progress + caching).
+
     Parameters
     ----------
     download_path:str or None
-        Target path of downloaded ``cellphonedb.zip`` file.
+        Target path of downloaded ``cellphonedb.zip`` file. If ``None``,
+        defaults to ``$OVAGENT_HOME/data_lake/cellphonedb.zip`` (so the
+        same cache is shared across ov.Agent sessions).
     force_download:bool
         Whether to redownload when file already exists.
 
@@ -796,63 +843,57 @@ def download_cellphonedb_database(download_path=None, force_download=False):
         Path to downloaded database archive.
     """
     import os
-    import urllib.request
-    import urllib.error
     from pathlib import Path
-    
+    from ..datasets._datasets import download_data_requests
+
     if download_path is None:
-        download_path = './cellphonedb.zip'
-    
+        try:
+            from ..utils._ovagent_paths import ovagent_home
+            download_path = ovagent_home() / "data_lake" / "cellphonedb.zip"
+        except Exception:
+            download_path = Path("./cellphonedb.zip")
+
     download_path = Path(download_path)
-    
-    # Check if file already exists
+
     if download_path.exists() and not force_download:
         print(f"✅ CellPhoneDB database already exists: {download_path}")
         return str(download_path)
-    
-    # URLs to try in order
+    if download_path.exists() and force_download:
+        download_path.unlink()
+
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+
     download_urls = [
         "https://github.com/ventolab/cellphonedb-data/raw/refs/heads/master/cellphonedb.zip",
-        "https://starlit.oss-cn-beijing.aliyuncs.com/single/cellphonedb.zip"
+        "https://starlit.oss-cn-beijing.aliyuncs.com/single/cellphonedb.zip",
     ]
-    
+
     print("📥 Downloading CellPhoneDB database...")
-    
+    last_err = None
     for i, url in enumerate(download_urls, 1):
         try:
             print(f"   - Trying URL {i}/{len(download_urls)}: {url}")
-            
-            # Create directory if it doesn't exist
-            download_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Download with progress
-            def show_progress(block_num, block_size, total_size):
-                if total_size > 0:
-                    percent = min(100, block_num * block_size * 100 / total_size)
-                    print(f"\r     Progress: {percent:.1f}%", end='', flush=True)
-            
-            urllib.request.urlretrieve(url, download_path, reporthook=show_progress)
-            print(f"\n✅ Successfully downloaded CellPhoneDB database to: {download_path}")
-            
-            # Verify file is not empty
-            if download_path.stat().st_size > 0:
-                return str(download_path)
-            else:
-                print(f"❌ Downloaded file is empty, trying next URL...")
-                download_path.unlink(missing_ok=True)
-                
-        except urllib.error.URLError as e:
-            print(f"\n❌ Failed to download from {url}: {e}")
-            download_path.unlink(missing_ok=True)
+            result = download_data_requests(
+                url=url,
+                file_path=download_path.name,
+                dir=str(download_path.parent),
+            )
+            if Path(result).stat().st_size > 0:
+                print(f"✅ Successfully downloaded CellPhoneDB database to: {result}")
+                return str(result)
+            Path(result).unlink(missing_ok=True)
+        except Exception as exc:
+            last_err = exc
+            print(f"   ✗ {url} failed: {exc}")
+            try:
+                download_path.unlink()
+            except FileNotFoundError:
+                pass
             continue
-        except Exception as e:
-            print(f"\n❌ Unexpected error downloading from {url}: {e}")
-            download_path.unlink(missing_ok=True)
-            continue
-    
+
     raise RuntimeError(
-        "Failed to download CellPhoneDB database from all available URLs. "
-        "Please check your internet connection or manually download the database."
+        "Failed to download CellPhoneDB database from all mirrors. "
+        f"Last error: {last_err}. Check network or pass cpdb_file_path= manually."
     )
 
 

@@ -123,6 +123,53 @@ class PromptBuilder:
         if getattr(self._ctx, "_code_only_mode", False):
             engine.add_overlay(PromptOverlay("code_only_mode", CODE_ONLY_MODE, priority=80))
 
+        # Always-on: mandate registry-first workflow before any analysis code.
+        # Conditional rules ("if you use ov.* then search") get bypassed by
+        # models that fall back to plain scanpy/numpy. So we mandate UNCONDITIONALLY:
+        # Step 1 of every analysis MUST be search_functions to discover the
+        # specialist omicverse implementations the registry exposes.
+        engine.add_overlay(PromptOverlay(
+            "registry_first",
+            (
+                "MANDATORY WORKFLOW for any single-cell / spatial / multi-omics task:\n"
+                "  Step 1 (REQUIRED, FIRST tool call): call "
+                "search_functions(query=\"<task keywords>\") to discover the "
+                "omicverse functions designed for this task. The omicverse registry "
+                "contains 870 curated, GPU-aware, validated functions that handle "
+                "edge cases (sparse matrices, mt-prefix detection, version drift) "
+                "that handwritten scanpy/numpy code typically gets wrong.\n"
+                "  Step 2: prefer the ov.* functions returned by search_functions over "
+                "writing your own scanpy / numpy code. Falling back to handwritten "
+                "code is allowed ONLY after search_functions returns no relevant matches.\n"
+                "  Skipping Step 1 is a workflow violation that will fail the task."
+            ),
+            priority=10,    # Very high priority — render near the top of system prompt
+        ))
+
+        # Always-on: when a tool call fails with FileNotFoundError, missing-DB,
+        # or 'please download X first' messages, the model must search the
+        # function registry for the matching `download_*` helper before retrying
+        # the call or hand-coding a workaround. Many ov.* functions (cellphonedb_v5,
+        # TOSICA, geneset enrichment, gene-id mapping) require external reference
+        # files that have a paired `ov.*.download_*` function in the registry.
+        engine.add_overlay(PromptOverlay(
+            "missing_file_recovery",
+            (
+                "ERROR-RECOVERY RULE: if a tool call fails with one of:\n"
+                "  - FileNotFoundError\n"
+                "  - 'database not found' / 'please download'\n"
+                "  - 'missing required positional argument' for an *_path / *_file param\n"
+                "  - 'No such file or directory' for an external reference (genesets, "
+                "    cellphonedb DB, model checkpoint, GMT pathway file, gene-id annotation)\n"
+                "your NEXT tool call must be search_functions(query=\"download <missing thing>\") "
+                "to find the paired `download_*` helper, call that helper to fetch the file, "
+                "then retry the original call. Do NOT fabricate a path, write the algorithm "
+                "from scratch, or skip the step. Most ov.* functions that need a reference "
+                "file have a `ov.*.download_*` companion in the registry."
+            ),
+            priority=11,    # Just below registry_first
+        ))
+
         # Dynamic: skill listing overlay
         registry = self._ctx.skill_registry
         if registry is not None and getattr(registry, "skill_metadata", None):

@@ -67,7 +67,8 @@ from ._cpdb import (
     cpdb_interaction_filtered,
     cpdb_submeans_exacted,cpdb_exact_target,
     cpdb_exact_source,cellphonedb_v5,
-    run_cellphonedb_v5, format_cpdb_results, format_cpdb_results_for_viz
+    run_cellphonedb_v5, format_cpdb_results, format_cpdb_results_for_viz,
+    download_cellphonedb_database, validate_cpdb_database,
 )
 from ._liana import run_liana, format_liana_results, format_liana_results_for_viz
 from ._comm import to_comm_adata, extract_comm_adata
@@ -304,6 +305,8 @@ __all__ = [
     'cpdb_exact_source',
     'cellphonedb_v5',
     'run_cellphonedb_v5',
+    'download_cellphonedb_database',
+    'validate_cpdb_database',
     'format_cpdb_results',
     'format_cpdb_results_for_viz',
     'run_liana',

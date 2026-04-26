@@ -1367,6 +1367,12 @@ def _chat_tools_openai(
 
                 # Build raw message dict for re-injection into messages list
                 raw_msg = {"role": "assistant", "content": content}
+                # Preserve reasoning / thinking content (ollama, openai-o1, deepseek-r1).
+                # Without this, tool-call-only responses lose the model's chain-of-thought
+                # and the live trace shows only "decided to call N tool(s)".
+                _reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+                if _reasoning:
+                    raw_msg["reasoning"] = _reasoning
                 if tc_list:
                     raw_msg["tool_calls"] = [
                         {

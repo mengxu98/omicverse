@@ -116,7 +116,7 @@ class pyTOSICA(object):
                  label_name:str='Celltype',mask_ratio:float=0.015,
                  max_g:int=300,max_gs:int=300,n_unannotated:int= 1,
                  embed_dim:int=48,depth:int=1,num_heads:int=4,batch_size:int=8,
-                 device:str='cuda:0'
+                 device:str='cuda:0',auto_download:bool=True,
                  ) -> None:
         r"""Initialize a pyTOSICA object for cell type classification.
 
@@ -187,9 +187,26 @@ class pyTOSICA(object):
             if '.gmt' in gmt_path:
                 gmt_path = gmt_path
             else:
-                gmt_path = tosica_backend["get_gmt"](gmt_path)
-                if gmt_path=="Error":
-                    print("You need to download the gene sets first using ov.utils.download_tosica_gmt()")
+                resolved = tosica_backend["get_gmt"](gmt_path)
+                if resolved == "Error":
+                    if auto_download:
+                        print("   - TOSICA GMT not found locally; auto-downloading via "
+                              "ov.utils.download_tosica_gmt()...")
+                        from ..utils._data import download_tosica_gmt
+                        download_tosica_gmt()
+                        resolved = tosica_backend["get_gmt"](gmt_path)
+                        if resolved == "Error":
+                            raise FileNotFoundError(
+                                f"TOSICA GMT '{gmt_path}' still missing after "
+                                "auto-download. Pass an explicit .gmt path."
+                            )
+                    else:
+                        raise FileNotFoundError(
+                            f"TOSICA GMT '{gmt_path}' not found. Call "
+                            "ov.utils.download_tosica_gmt() first or pass an "
+                            "explicit .gmt path."
+                        )
+                gmt_path = resolved
             
             reactome_dict = tosica_backend["read_gmt"](gmt_path, min_g=0, max_g=max_g)
             mask,pathway = tosica_backend["create_pathway_mask"](feature_list=genes,

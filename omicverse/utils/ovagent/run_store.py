@@ -83,7 +83,7 @@ class RunStore:
     """Persist analysis runs under ``~/.ovagent/runs`` by default."""
 
     def __init__(self, root: Optional[Path] = None):
-        self.root = (root or (Path.home() / ".ovagent" / "runs")).expanduser()
+        from .._ovagent_paths import ovagent_home as _oh; self.root = (root or (_oh() / "runs")).expanduser()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _run_dir(self, run_id: str) -> Path:

@@ -37,7 +37,7 @@ class SessionHistory:
     """Append-only JSONL history file."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
-        self._path = path or Path.home() / ".ovagent" / "history.jsonl"
+        from ._ovagent_paths import ovagent_home as _oh; self._path = path or (_oh() / "history.jsonl")
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     # ---- write ----

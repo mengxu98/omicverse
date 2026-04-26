@@ -27,6 +27,7 @@ from ..harness import (
 from ..harness.runtime_state import runtime_state
 from ..harness.tool_catalog import normalize_tool_name
 from ..session_history import HistoryEntry
+from ..agent_errors import ProviderError
 
 from .context_budget import (
     BudgetSliceType,
@@ -653,7 +654,10 @@ class TurnController:
                         )
                         self._save_conversation_log(messages)
                         ctx._last_run_trace = recorder.trace
-                        return current_adata
+                        raise ProviderError(
+                            f"LLM chat call failed on turn {turn + 1}: {exc}",
+                            retryable=is_timeout,
+                        ) from exc
 
                 logger.info(
                     "agentic_llm_call_done turn=%d/%d elapsed_s=%.2f "
@@ -667,6 +671,41 @@ class TurnController:
 
                 if response.usage:
                     ctx.last_usage = response.usage
+
+                # Live trace: surface LLM-generated text + reasoning to the Reporter.
+                # Qwen3 thinking-mode and other reasoning models put their chain-of-thought
+                # in msg.reasoning (ollama, openai-o1) which our ChatResponse may drop.
+                # Pull from raw_message if present; emit content + reasoning + tool_call summary.
+                try:
+                    from ..agent_reporter import EventLevel as _EL
+                    raw = response.raw_message
+                    raw_dict = raw if isinstance(raw, dict) else {}
+                    if not raw_dict and isinstance(raw, list) and raw:
+                        for _item in raw:
+                            if isinstance(_item, dict) and _item.get("role") == "assistant":
+                                raw_dict = _item; break
+                    _reasoning = (raw_dict.get("reasoning")
+                                  or raw_dict.get("reasoning_content")
+                                  or "")
+                    _content = response.content or raw_dict.get("content") or ""
+                    _content = _content if isinstance(_content, str) else str(_content)
+                    if _reasoning:
+                        _r = str(_reasoning).strip()
+                        if len(_r) > 600:
+                            _r = _r[:600] + f"... [+{len(str(_reasoning)) - 600} chars]"
+                        ctx._emit(_EL.INFO, f"💭 thinking: {_r}", "llm_reasoning")
+                    if _content.strip():
+                        _t = _content.strip()
+                        if len(_t) > 600:
+                            _t = _t[:600] + f"... [+{len(_content) - 600} chars]"
+                        ctx._emit(_EL.INFO, f"💬 LLM: {_t}", "llm")
+                    if response.tool_calls:
+                        _names = ", ".join(tc.name for tc in response.tool_calls)
+                        ctx._emit(_EL.INFO,
+                                  f"🧠 LLM decided to call {len(response.tool_calls)} tool(s): {_names}",
+                                  "llm_decision")
+                except Exception:
+                    pass
 
                 if response.raw_message:
                     if isinstance(response.raw_message, list):
@@ -870,6 +909,20 @@ class TurnController:
                             },
                         )
                         _step_ids[sc.index] = tool_step_id
+                        # Live trace: surface tool call to user-visible Reporter.
+                        # Emits one line per dispatch with name + truncated args.
+                        try:
+                            from ..agent_reporter import EventLevel as _EL
+                            _args_preview = json.dumps(tc.arguments, default=str)
+                            if len(_args_preview) > 200:
+                                _args_preview = _args_preview[:200] + "..."
+                            ctx._emit(
+                                _EL.INFO,
+                                f"🔧 {canonical or tc.name}({_args_preview})",
+                                "tool_call",
+                            )
+                        except Exception:
+                            pass
                         await emitter.tool_dispatched(
                             canonical or tc.name,
                             tc.arguments,
@@ -1118,6 +1171,19 @@ class TurnController:
                                 category="tool",
                             )
                         )
+                        # Live trace: surface tool result to user-visible Reporter.
+                        try:
+                            from ..agent_reporter import EventLevel as _EL
+                            _out = tool_output if isinstance(tool_output, str) else str(tool_output)
+                            if len(_out) > 280:
+                                _out = _out[:280] + f"... [+{len(tool_output) - 280} chars]"
+                            ctx._emit(
+                                _EL.INFO,
+                                f"   ↳ {canonical or tc.name} → {_out}",
+                                "tool_result",
+                            )
+                        except Exception:
+                            pass
 
                         try:
                             parsed_tool_output = json.loads(tool_output)
@@ -1322,6 +1388,8 @@ class TurnController:
                         )
                     self._save_conversation_log(messages)
                     ctx._last_run_trace = recorder.trace
+                    if current_adata is None and final_summary:
+                        return final_summary
                     return current_adata
 
             # Post-loop
@@ -1377,6 +1445,8 @@ class TurnController:
                 )
             self._save_conversation_log(messages)
             ctx._last_run_trace = recorder.trace
+            if current_adata is None and final_summary:
+                return final_summary
             return current_adata
         except Exception as exc:
             recorder.add_step("error", summary=str(exc))

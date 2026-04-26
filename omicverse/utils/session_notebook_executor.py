@@ -80,7 +80,8 @@ class SessionNotebookExecutor:
     ):
         """Initialize SessionNotebookExecutor with configuration."""
         self.max_prompts_per_session = max_prompts_per_session
-        self.storage_dir = storage_dir or Path.home() / ".ovagent" / "sessions"
+        from ._ovagent_paths import ovagent_home
+        self.storage_dir = storage_dir or (ovagent_home() / "sessions")
         self.storage_dir.mkdir(exist_ok=True, parents=True)
         self.keep_notebooks = keep_notebooks
         self.timeout = timeout

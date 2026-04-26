@@ -200,9 +200,24 @@ class Alpha:
         return df
 
     def shannon(self) -> pd.Series:
+        """Per-sample Shannon entropy.
+
+        Convenience wrapper for ``self.run('shannon')['shannon']``.
+        Higher values mean more even community composition (mathematical
+        max is ``log(n_taxa)``). Sensitive to rare taxa, so always rarefy
+        first if sequencing depths are unequal — otherwise samples with
+        more reads will appear "more diverse" purely from depth.
+        """
         return self.run("shannon")["shannon"]
 
     def observed(self) -> pd.Series:
+        """Per-sample observed-OTU count.
+
+        Convenience wrapper for ``self.run('observed_otus')['observed_otus']``.
+        Number of distinct ASVs / OTUs with non-zero counts in each sample.
+        Strongly depth-dependent — always rarefy first or pair with a
+        depth-corrected metric (``chao1``, ``faith_pd``).
+        """
         return self.run("observed_otus")["observed_otus"]
 
 
@@ -346,4 +361,14 @@ class Beta:
         return pd.DataFrame(dm_skbio.data, index=ids, columns=ids)
 
     def braycurtis(self, rarefy: bool = True) -> pd.DataFrame:
+        """Bray-Curtis dissimilarity matrix (samples × samples).
+
+        Convenience wrapper for ``self.run('braycurtis', rarefy=...)``.
+        Bray-Curtis is the de-facto default beta metric for 16S — it
+        weights species by abundance and ranges 0 (identical) to 1
+        (no shared taxa). When ``rarefy=True`` (the default), the
+        underlying count matrix is rarefied to a common depth before
+        the calculation; when ``False``, raw counts are used (sensible
+        only after CLR or proportion transforms).
+        """
         return self.run("braycurtis", rarefy=rarefy)

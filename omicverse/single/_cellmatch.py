@@ -43,8 +43,48 @@ from .._registry import register_function
     related=["single.download_cl", "single.pySCSA", "single.gptcelltype"]
 )
 class CellOntologyMapper:
-    """
-    🧬 Cell ontology mapping class using NLP
+    """Map free-text cell-type annotations to the Cell Ontology (CL) via NLP.
+
+    Sentence-transformer encoder over the CL terms; cosine-similarity
+    matching of every annotated cell name to the closest ontology term.
+    Optional add-ons:
+
+    - **Abbreviation expansion** (LLM-driven, optional) — turns
+      ``"TIL-1"`` into ``"tissue-resident memory CD8+ T cell"`` before
+      matching, dramatically improving recall on author-shorthand labels.
+    - **Cell Taxonomy resource** (Jin *et al.* 2023) — a second ontology
+      keyed by species + tissue, with marker genes; provides
+      ``map_*_with_taxonomy`` variants.
+    - **Marker-gene search** — find ontology terms whose marker set
+      overlaps your cluster's top-N markers (`search_by_marker`).
+
+    Lifecycle: construct with a CL OBO file (or download via
+    :func:`download_cl`); the encoder is loaded lazily on first
+    ``map_*`` call. Pre-computed sentence embeddings can be cached via
+    ``embeddings_path`` to skip the ~30 s encode step on repeated
+    calls.
+
+    Typical workflow
+    ----------------
+    >>> ov.single.download_cl(output_dir='cl_dir', filename='cl.json')
+    >>> mapper = ov.single.CellOntologyMapper(
+    ...     cl_obo_file='cl_dir/cl.json',
+    ...     embeddings_path='cl_dir/ontology_embeddings.pkl',
+    ...     local_model_dir='./my_models',
+    ... )
+    >>> results = mapper.map_adata(adata, cell_name_col='cell_label')
+    >>> mapper.print_mapping_summary(results, top_n=15)
+
+    Adds (after ``map_adata``)
+    --------------------------
+    - ``adata.obs['cell_ontology']`` — best-match CL term name.
+    - ``adata.obs['cell_ontology_cl_id']`` — CL ID (e.g. ``CL:0000084``).
+    - ``adata.obs['cell_ontology_score']`` — cosine similarity.
+
+    Use ``map_adata_with_expansion(...)`` when annotations contain
+    abbreviations and ``setup_llm_expansion`` has been configured.
+    Use ``map_adata_with_taxonomy(...)`` when species + tissue context
+    is needed (Cell Taxonomy adds species-aware mappings).
     """
     
     def __init__(self, cl_obo_file=None, embeddings_path=None, model_name="all-mpnet-base-v2", local_model_dir=None, auto_download=True):

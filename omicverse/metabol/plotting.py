@@ -350,7 +350,30 @@ def vip_bar(
     ax: Optional[plt.Axes] = None,
     figsize: tuple[float, float] = (5.0, 5.0),
 ):
-    """Horizontal bar chart of top-``top_n`` VIP metabolites."""
+    """Horizontal bar chart of top-``top_n`` VIP metabolites.
+
+    Bars sorted by VIP score (descending). Colour encodes the sign of
+    the PLS-DA regression coefficient — red for upregulated in the
+    positive class, blue for downregulated — so the figure simultaneously
+    shows importance and direction. The dashed grey line at VIP=1 is
+    Wold's classical importance cutoff (features above 1 are retained).
+
+    Parameters
+    ----------
+    result : PLSDAResult
+        Output of :func:`omicverse.metabol.plsda` or :func:`opls_da`.
+    var_names :
+        Iterable of metabolite names — typically ``adata.var_names`` —
+        used to label the bars.
+    top_n : int, default 15
+        Number of top-VIP metabolites to plot.
+    ax, figsize :
+        Standard matplotlib hooks.
+
+    Returns
+    -------
+    (fig, ax) tuple.
+    """
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -389,7 +412,29 @@ def sample_qc_plot(
     normal_color: str = "#2980b9",
     outlier_color: str = "#c0392b",
 ):
-    """Scatter of Hotelling T² vs DModX with critical-value lines."""
+    """Scatter of Hotelling T² vs DModX with critical-value lines.
+
+    Standard SIMCA-style outlier diagnostic. Each sample is one point;
+    the dashed grey lines are the alpha-level (default 0.95) critical
+    values from :func:`omicverse.metabol.sample_qc`. Samples above
+    *either* line are flagged — Hotelling T² captures distance from the
+    PCA centre (within-model outliers), DModX captures distance to the
+    PCA hyperplane (off-model outliers).
+
+    Parameters
+    ----------
+    qc_df : pd.DataFrame
+        Output of :func:`omicverse.metabol.sample_qc` — must contain
+        ``T2``, ``DModX``, ``T2_crit``, ``DModX_crit`` and ``is_outlier``.
+    normal_color, outlier_color :
+        Hex / named colours for the two populations.
+    ax, figsize :
+        Standard matplotlib hooks.
+
+    Returns
+    -------
+    (fig, ax) tuple.
+    """
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -430,7 +475,31 @@ def dgca_class_bar(
     figsize: tuple[float, float] = (6.0, 3.5),
     log: bool = True,
 ):
-    """Bar chart of DC-class counts (+/+, +/0, +/-, -/+, ...)."""
+    """Bar chart of DC-class counts (+/+, +/0, +/-, -/+, ...).
+
+    Summarises the rewiring profile from :func:`omicverse.metabol.dgca`.
+    Each pair of metabolites is assigned a class encoding the sign of
+    their correlation in group A and group B (`+`, `-`, `0` for
+    significant positive, significant negative, or non-significant).
+    Symmetric reversals (``+/-`` and ``-/+``) get the same red colour
+    because they're the strongest rewiring signal; ``+/+`` / ``-/-``
+    are concordant (no rewiring); ``0/0`` (no signal in either group)
+    is greyed out and pushed to the right.
+
+    Parameters
+    ----------
+    dc_df : pd.DataFrame
+        Output of :func:`omicverse.metabol.dgca` — needs the ``dc_class``
+        column.
+    log : bool, default True
+        Log-scale the y-axis (counts often span orders of magnitude).
+    ax, figsize :
+        Standard matplotlib hooks.
+
+    Returns
+    -------
+    (fig, ax) tuple.
+    """
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -489,7 +558,42 @@ def corr_network_plot(
     with_labels: bool = True,
     label_font_size: int = 7,
 ):
-    """Draw an edge DataFrame as a NetworkX spring-layout plot."""
+    """Draw an edge DataFrame as a NetworkX spring-layout plot.
+
+    Renders the output of :func:`omicverse.metabol.corr_network` as a
+    correlation graph: nodes are metabolites, edges are pairs whose
+    Spearman / Pearson |r| exceeded the network's threshold. Edge
+    colour encodes the sign of the correlation (red = positive,
+    blue = negative); edge width is proportional to ``|r|``.
+
+    Parameters
+    ----------
+    edges_df : pd.DataFrame
+        Output of :func:`corr_network` — needs columns ``feature_a``,
+        ``feature_b`` and ``r`` (or whatever ``r_column`` points at).
+    layout : {'spring', 'circular', 'kamada_kawai'}, default 'spring'
+        NetworkX layout algorithm.
+    node_size, node_color, node_edge_color :
+        Standard styling. White-fill / dark-edge nodes read better in
+        publications than filled ones because labels overlay legibly.
+    edge_width_scale : float
+        Multiplier on ``|r|`` for edge width (so ``|r|=1`` is the
+        thickest edge in the figure).
+    r_column : str, default 'r'
+        Column to read for edge correlations. Switch to ``'r_a'`` /
+        ``'r_b'`` if you're plotting one half of a DGCA result.
+    with_labels : bool, default True
+        Toggle metabolite labels.
+    label_font_size : int, default 7
+        Label size — reduce for dense graphs.
+    seed : int
+        RNG seed for the spring-layout (only matters when ``layout='spring'``).
+
+    Returns
+    -------
+    (fig, ax) tuple. If ``edges_df`` is empty, draws a centred
+    "no edges" placeholder and returns the empty axes.
+    """
     import networkx as nx
 
     if ax is None:
@@ -549,7 +653,28 @@ def asca_variance_bar(
     ax: Optional[plt.Axes] = None,
     figsize: tuple[float, float] = (5.5, 3.0),
 ):
-    """Horizontal bars of per-effect variance-explained fractions."""
+    """Horizontal bars of per-effect variance-explained fractions.
+
+    Visualises the partition of total sum-of-squares from
+    :func:`omicverse.metabol.asca` across the named effects (factors
+    and their interactions) plus the residual. The grey "residual"
+    bar at the bottom shows what the model didn't explain — a useful
+    sanity check: if residual variance dominates, the planned factors
+    don't capture the dominant signal and the model needs revision.
+
+    Parameters
+    ----------
+    asca_result : ASCAResult
+        Output of :func:`asca`. Reads ``.effects[name].variance_explained``
+        for each named effect plus ``.residual_ss`` / ``.total_ss``.
+    ax, figsize :
+        Standard matplotlib hooks.
+
+    Returns
+    -------
+    (fig, ax) tuple. Bar labels show variance percentage with one
+    decimal place.
+    """
     import numpy as np
 
     if ax is None:

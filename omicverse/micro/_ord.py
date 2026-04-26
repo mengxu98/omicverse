@@ -105,7 +105,26 @@ class Ordinate:
     )
     def nmds(self, n: int = 2, random_state: int = 0,
              write_to_obsm: bool = True) -> pd.DataFrame:
-        """Non-metric multi-dimensional scaling (via sklearn)."""
+        """Non-metric multi-dimensional scaling on the distance matrix.
+
+        Wraps `sklearn.manifold.MDS(dissimilarity='precomputed')`. NMDS
+        preserves rank order rather than absolute distances — typically
+        less distorted on Bray-Curtis / Jaccard than linear PCoA.
+
+        Parameters
+        ----------
+        n : int, default 2
+            Output dimensions.
+        random_state : int, default 0
+            Seeds the four-restart NMDS init for reproducibility.
+        write_to_obsm : bool, default True
+            Persist coords into ``adata.obsm[f'{dist_key}_nmds']`` and
+            the final stress value into ``adata.uns['micro']``.
+
+        Returns
+        -------
+        pd.DataFrame indexed by sample with columns ``NMDS1..NMDSn``.
+        """
         try:
             from sklearn.manifold import MDS
         except ImportError as exc:
@@ -124,5 +143,11 @@ class Ordinate:
                             columns=[f"NMDS{i+1}" for i in range(n)])
 
     def proportion_explained(self) -> Optional[np.ndarray]:
-        """Eigenvalue proportions from the most recent PCoA call."""
+        """Eigenvalue proportions from the most recent PCoA call.
+
+        Returns ``None`` if PCoA hasn't run yet (NMDS doesn't produce
+        eigenvalues — use ``adata.uns['micro'][f'{dist_key}_nmds_stress']``
+        instead). The first two values are the canonical "PC1 / PC2"
+        % variance labels for ordination plots.
+        """
         return self.proportion_explained_

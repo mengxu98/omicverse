@@ -552,7 +552,36 @@ class MMvec:
         adata_metabolite: "ad.AnnData",
         verbose: bool = False,
     ) -> "MMvec":
-        """Train on the paired count tables and return ``self``."""
+        """Fit MMvec on paired microbe / metabolite count tables and return ``self``.
+
+        Trains a low-rank latent-space model
+        ``logits[i, j] = U[i] · V[j] + β[j]``, where rows of ``U`` are
+        microbe embeddings, rows of ``V`` are metabolite embeddings,
+        and the loss is per-microbe negative log-likelihood of the
+        sample-weighted metabolite distribution. The cooccurrence
+        weights ``W[i, j] = Σ_s X_mb[s, i] · X_mt[s, j] / Σ_s X_mt[s, :]``
+        capture which microbes covary with which metabolites across
+        samples.
+
+        Both AnnDatas must share ``obs_names`` in the same order
+        (`_check_paired` enforces this). Training reports an early-stop
+        validation loss every epoch when ``val_frac > 0``; ``patience``
+        epochs without validation improvement stops training and
+        restores the best checkpoint.
+
+        Parameters
+        ----------
+        adata_microbe, adata_metabolite : AnnData
+            Sample-aligned count tables.
+        verbose : bool, default False
+            Print loss every ``epochs // 10`` epochs.
+
+        Returns
+        -------
+        self — fitted; access ``microbe_embeddings_``,
+        ``metabolite_embeddings_``, ``cooccurrence()``,
+        ``conditional_probabilities()``, ``top_pairs(n)``.
+        """
         torch = _require_torch()
         _check_paired(adata_microbe, adata_metabolite)
         torch.manual_seed(self.seed)
@@ -665,14 +694,32 @@ class MMvec:
                             columns=[f"K{i+1}" for i in range(self.n_latent)])
 
     def cooccurrence(self) -> pd.DataFrame:
-        """Raw log-odds co-occurrence matrix U · Vᵀ."""
+        """Raw log-odds co-occurrence matrix ``U · Vᵀ`` (microbes × metabolites).
+
+        Symmetric scoring before per-microbe softmax normalisation:
+        positive entries indicate microbes and metabolites that
+        appear together in the same samples; negative entries the
+        opposite. Useful when you want **signed** scores and don't
+        need them to sum to 1 per microbe — for example, downstream
+        co-occurrence heatmaps and ``top_pairs(n)``. Use
+        :meth:`conditional_probabilities` instead when you want
+        proper P(metabolite | microbe) probabilities.
+        """
         self._check_fitted()
         return pd.DataFrame(self.U_ @ self.V_.T,
                             index=self.microbe_names_,
                             columns=self.metabolite_names_)
 
     def conditional_probabilities(self) -> pd.DataFrame:
-        """Matrix of P(metabolite | microbe) = softmax(U @ V.T + β) per row."""
+        """Per-microbe P(metabolite | microbe) — softmax of ``U @ V.T + β``.
+
+        For each microbe (row), the values across metabolites (columns)
+        sum to 1 — this is what MMvec's loss directly optimises. Use
+        these when the question is "given that microbe X is present,
+        which metabolite is most likely?" rather than the symmetric
+        co-occurrence question. Numerically stable: subtracts the
+        per-row max before exponentiating.
+        """
         self._check_fitted()
         logits = self.U_ @ self.V_.T + self.beta_
         logits -= logits.max(axis=1, keepdims=True)
@@ -683,7 +730,14 @@ class MMvec:
                             columns=self.metabolite_names_)
 
     def top_pairs(self, n: int = 20) -> pd.DataFrame:
-        """Top-``n`` (microbe, metabolite) pairs by |log-odds| score."""
+        """Top-``n`` (microbe, metabolite) pairs ranked by ``|log-odds|``.
+
+        Stacks :meth:`cooccurrence` into long format and sorts by the
+        absolute score, so the top of the list mixes strong positive
+        and strong negative pairs (read the ``score`` column to see
+        the sign). Returns a DataFrame with columns
+        ``microbe``, ``metabolite``, ``score``.
+        """
         co = self.cooccurrence().stack().rename("score").reset_index()
         co.columns = ["microbe", "metabolite", "score"]
         idx = co["score"].abs().sort_values(ascending=False).index
@@ -706,7 +760,25 @@ def plot_mmvec_training(
     mmvec: "MMvec",
     ax: Optional[Any] = None,
 ) -> Any:
-    """Training (and validation) loss curve for a fitted :class:`MMvec`."""
+    """Training (and validation) loss curve for a fitted :class:`MMvec`.
+
+    Plots ``mmvec.loss_history_`` (and ``val_loss_history_`` if a
+    validation split was kept) per epoch. Marks the best-validation
+    epoch with a vertical line — that's where the saved checkpoint
+    came from. A monotonically falling validation loss is healthy;
+    a rising val loss while train keeps falling is overfitting.
+
+    Parameters
+    ----------
+    mmvec : MMvec
+        Fitted model.
+    ax : matplotlib axes, optional
+        Axes to draw on; created if not provided.
+
+    Returns
+    -------
+    matplotlib axes.
+    """
     import matplotlib.pyplot as plt
 
     mmvec._check_fitted()
@@ -805,7 +877,29 @@ def plot_embedding_biplot(
     label_top: int = 5,
     ax: Optional[Any] = None,
 ) -> Any:
-    """2-D scatter of microbe + metabolite embeddings in the MMvec space."""
+    """Biplot of microbe + metabolite embeddings in the MMvec latent space.
+
+    Draws two scatter point clouds in the same panel: microbes (rows
+    of ``mmvec.U_``) and metabolites (rows of ``mmvec.V_``) projected
+    onto the chosen ``components`` (default the first two latent
+    factors). Annotates the ``label_top`` items farthest from the
+    origin in each cloud — these are the entities most strongly
+    associated with that pair of latent factors.
+
+    Parameters
+    ----------
+    mmvec : MMvec
+        Fitted model.
+    components : (int, int), default (0, 1)
+        Zero-indexed latent factors to plot.
+    label_top : int, default 5
+        Number of microbes / metabolites to annotate in each cloud.
+    ax : matplotlib axes, optional
+
+    Returns
+    -------
+    matplotlib axes.
+    """
     import matplotlib.pyplot as plt
 
     mmvec._check_fitted()

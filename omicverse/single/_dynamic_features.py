@@ -66,6 +66,23 @@ def _resolve_dataset_param(value: Any, dataset_name: str, source_dataset_name: s
     return value.get(source_dataset_name)
 
 
+def _normalize_obs_keys(obs_keys: Any) -> list[str]:
+    if obs_keys is None:
+        return []
+    if isinstance(obs_keys, str):
+        keys = [obs_keys]
+    else:
+        keys = [str(key) for key in obs_keys]
+    seen = set()
+    out = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
 def _iter_dataset_views(
     dataset_map: Mapping[str, AnnData],
     *,
@@ -241,6 +258,9 @@ def _prepare_table_for_uns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for column in out.columns:
         series = out[column]
+        if isinstance(series.dtype, pd.CategoricalDtype):
+            out[column] = series.astype(str)
+            continue
         if not is_object_dtype(series.dtype):
             continue
         kind = infer_dtype(series, skipna=True)
@@ -373,6 +393,7 @@ def dynamic_features(
     min_cells: int = 20,
     min_variance: float = 1e-8,
     store_raw: bool = False,
+    raw_obs_keys: Sequence[str] | str | Mapping[str, Sequence[str] | str] | None = None,
     key_added: str | None = "dynamic_features",
     verbose: bool = True,
 ) -> DynamicFeaturesResult:
@@ -428,6 +449,12 @@ def dynamic_features(
         This must be enabled if downstream plotting should overlay individual
         points, for example via :func:`ov.pl.dynamic_trends` with
         ``add_point=True``.
+    raw_obs_keys
+        Optional ``obs`` columns to copy into the stored raw point table when
+        ``store_raw=True``. This is useful for downstream point coloring in
+        :func:`ov.pl.dynamic_trends`, for example ``raw_obs_keys=['State']``.
+        When ``data`` is a mapping, this may also be a mapping from dataset
+        name to the desired obs keys.
     key_added
         Optional key used to store outputs in ``adata.uns`` for single-dataset
         inputs.
@@ -474,6 +501,8 @@ def dynamic_features(
         print(f"   {Colors.CYAN}Pseudotime: {Colors.BOLD}{pseudotime}{Colors.ENDC}")
         if groupby is not None:
             print(f"   {Colors.CYAN}Grouping: {Colors.BOLD}{groupby}{Colors.ENDC}")
+        if store_raw and raw_obs_keys is not None:
+            print(f"   {Colors.CYAN}Stored raw obs keys: {Colors.BOLD}{raw_obs_keys}{Colors.ENDC}")
         if layer is not None:
             print(f"   {Colors.CYAN}Layer: {Colors.BOLD}{layer}{Colors.ENDC}")
         elif use_raw:
@@ -500,6 +529,14 @@ def dynamic_features(
         time = pd.to_numeric(adata_use.obs[pseudotime], errors="coerce").to_numpy(dtype=float)
         weight_spec = _resolve_dataset_param(weights, dataset_name, source_dataset_name)
         weights_arr = _resolve_weights(weight_spec, adata_use, dataset_name)
+        dataset_raw_obs_keys = _normalize_obs_keys(
+            _resolve_dataset_param(raw_obs_keys, dataset_name, source_dataset_name)
+        )
+        for obs_key in dataset_raw_obs_keys:
+            if obs_key not in adata_use.obs.columns:
+                raise KeyError(
+                    f"Raw obs key `{obs_key}` was not found in adata.obs for dataset `{dataset_name}`."
+                )
         keep = np.isfinite(time)
         if np.sum(keep) < min_cells:
             raise ValueError(
@@ -532,6 +569,10 @@ def dynamic_features(
 
             y = _extract_feature_vector(adata_use, gene, layer=layer, use_raw=use_raw)[order]
             w = weights_arr[order] if weights_arr is not None else None
+            raw_obs_arrays = {
+                obs_key: adata_use.obs[obs_key].to_numpy()[order]
+                for obs_key in dataset_raw_obs_keys
+            }
 
             finite = np.isfinite(time) & np.isfinite(y)
             if w is not None:
@@ -539,6 +580,10 @@ def dynamic_features(
             x_fit = time[finite]
             y_fit = y[finite]
             w_fit = w[finite] if w is not None else None
+            raw_obs_fit = {
+                obs_key: values[finite]
+                for obs_key, values in raw_obs_arrays.items()
+            }
 
             if x_fit.shape[0] < min_cells:
                 stats_records.append(
@@ -640,11 +685,21 @@ def dynamic_features(
                             "pseudotime": float(pt),
                             "expression": float(expr),
                             "weight": float(weight) if weight is not None and np.isfinite(weight) else np.nan,
+                            **{
+                                obs_key: (
+                                    raw_obs_fit[obs_key][row_idx].item()
+                                    if hasattr(raw_obs_fit[obs_key][row_idx], "item")
+                                    else raw_obs_fit[obs_key][row_idx]
+                                )
+                                for obs_key in dataset_raw_obs_keys
+                            },
                         }
-                        for pt, expr, weight in zip(
-                            x_fit,
-                            y_fit,
-                            w_fit if w_fit is not None else [None] * len(x_fit),
+                        for row_idx, (pt, expr, weight) in enumerate(
+                            zip(
+                                x_fit,
+                                y_fit,
+                                w_fit if w_fit is not None else [None] * len(x_fit),
+                            )
                         )
                     )
             except Exception as e:
@@ -699,6 +754,16 @@ def dynamic_features(
             "spline_order": spline_order,
             "grid_size": grid_size,
             "confidence_level": confidence_level,
+            "store_raw": store_raw,
+            "raw_obs_keys": (
+                None
+                if raw_obs_keys is None
+                else [raw_obs_keys]
+                if isinstance(raw_obs_keys, str)
+                else list(raw_obs_keys)
+                if not isinstance(raw_obs_keys, Mapping)
+                else dict(raw_obs_keys)
+            ),
         },
     )
 

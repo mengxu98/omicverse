@@ -276,10 +276,6 @@ def umap(
 
     return connectivities.tocsr()
 
-
-
-
-import torch
 from scipy.sparse import csr_matrix
 
 
@@ -291,7 +287,7 @@ def umap_gpu_optimized(
     n_neighbors: int,
     set_op_mix_ratio: float = 1.0,
     local_connectivity: float = 1.0,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    device: str | None = None,
 ) -> csr_matrix:
     """GPU fuzzy simplicial set wrapping ``umap_pytorch.fuzzy_gpu``.
 
@@ -306,8 +302,11 @@ def umap_gpu_optimized(
     self-loops were not zeroed. This wrapper delegates to the verified
     torch port shipped in ``omicverse.external.umap_pytorch.fuzzy_gpu``.
     """
+    import torch
     from ..external.umap_pytorch.fuzzy_gpu import fuzzy_simplicial_set_gpu
 
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     if not isinstance(device, torch.device):
         device = torch.device(device)
     knn_i = torch.as_tensor(knn_indices, dtype=torch.long, device=device)

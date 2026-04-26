@@ -95,6 +95,13 @@ from ._single import (
     violin_old,
 )
 from ._dynamic_trends import dynamic_trends, plot_gam_trends
+from ._branch_streamplot import (
+    branch_streamplot,
+    compute_group_kde_profiles,
+    make_branch_centerline,
+    sigmoid_curve,
+    tapered_kde,
+)
 from ._general import (
     add_palue,
     create_transparent_gradient_colormap,
@@ -240,6 +247,11 @@ __all__ = [
     "pastel_palette",
     "dynamic_trends",
     "plot_gam_trends",
+    "branch_streamplot",
+    "compute_group_kde_profiles",
+    "make_branch_centerline",
+    "sigmoid_curve",
+    "tapered_kde",
     "purple_color",
     "red_color",
     "sc_color",

@@ -178,6 +178,8 @@ class FilesystemContextManager:
             self.base_dir = Path(base_dir)
         elif env_base_dir:
             self.base_dir = Path(env_base_dir).expanduser()
+        elif self.DEFAULT_BASE_DIR is not None:
+            self.base_dir = Path(self.DEFAULT_BASE_DIR).expanduser()
         else:
             from ._ovagent_paths import ovagent_home
             self.base_dir = ovagent_home() / "context"

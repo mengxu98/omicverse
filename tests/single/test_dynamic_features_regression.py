@@ -146,6 +146,7 @@ def test_dynamic_features_uns_tables_are_h5ad_serializable(monkeypatch, tmp_path
     adata = AnnData(np.array([[1.0], [2.0], [3.0]]))
     adata.var_names = pd.Index(["gene_a"])
     adata.obs["pseudotime"] = [0.0, 1.0, 2.0]
+    adata.obs["state_label"] = pd.Categorical(["1", "1", "2"], categories=["1", "2"], ordered=True)
 
     class FakeGAM:
         statistics_ = {}
@@ -181,6 +182,8 @@ def test_dynamic_features_uns_tables_are_h5ad_serializable(monkeypatch, tmp_path
         pseudotime="pseudotime",
         min_cells=2,
         grid_size=5,
+        store_raw=True,
+        raw_obs_keys=["state_label"],
     )
 
     output_path = tmp_path / "dynamic_features.h5ad"
@@ -239,3 +242,52 @@ def test_dynamic_features_can_split_single_adata_by_group(monkeypatch, dynamic_f
     assert "source_dataset" not in result.stats.columns
     assert set(result.stats["groupby_key"]) == {"cell_type"}
     assert set(result.stats["group"]) == {"TypeA", "TypeB"}
+
+
+def test_dynamic_features_store_raw_can_include_requested_obs_columns(monkeypatch, dynamic_features_mod):
+    adata = AnnData(np.array([[1.0], [2.0], [4.0], [5.0]]))
+    adata.var_names = pd.Index(["gene_a"])
+    adata.obs["pseudotime"] = [0.0, 1.0, 2.0, 3.0]
+    adata.obs["State"] = pd.Categorical(["1", "1", "2", "2"], categories=["1", "2"], ordered=True)
+
+    class FakeGAM:
+        statistics_ = {}
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fit(self, x, y, weights=None):
+            return self
+
+        def predict(self, x):
+            x = np.asarray(x).reshape(-1)
+            return np.linspace(0.0, 1.0, len(x))
+
+        def confidence_intervals(self, x, width=0.95):
+            x = np.asarray(x).reshape(-1)
+            lower = np.zeros(len(x), dtype=float)
+            upper = np.ones(len(x), dtype=float)
+            return np.column_stack([lower, upper])
+
+    monkeypatch.setattr(
+        dynamic_features_mod,
+        "_require_pygam",
+        lambda: {
+            ("normal", "identity"): FakeGAM,
+            "s": lambda *args, **kwargs: ("term", args, kwargs),
+        },
+    )
+
+    result = dynamic_features_mod.dynamic_features(
+        adata,
+        genes=["gene_a"],
+        pseudotime="pseudotime",
+        min_cells=2,
+        grid_size=5,
+        store_raw=True,
+        raw_obs_keys=["State"],
+    )
+
+    assert result.raw is not None
+    assert "State" in result.raw.columns
+    assert set(result.raw["State"].astype(str)) == {"1", "2"}

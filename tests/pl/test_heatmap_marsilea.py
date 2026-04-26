@@ -456,6 +456,35 @@ def test_dynamic_heatmap_grouped_var_names_reuse_cell_annotation_palette(simple_
     assert palette["Delta"] == "#2ca02c"
 
 
+def test_dynamic_heatmap_gene_group_strip_tracks_rows(simple_adata, stub_marsilea):
+    group_by_gene = {
+        "GeneA": "Early",
+        "GeneB": "Late",
+        "GeneC": "Early",
+        "GeneD": "Late",
+    }
+
+    heatmap = dynamic_heatmap(
+        simple_adata,
+        var_names={
+            "Early": ["GeneA", "GeneC"],
+            "Late": ["GeneB", "GeneD"],
+        },
+        pseudotime="pseudotime",
+        legend=False,
+    )
+
+    plotted_genes = list(heatmap.args[0].index)
+    left_color_calls = [call for call in heatmap.calls if call[0] == "add_left"]
+    color_tracks = [
+        call for call in left_color_calls if getattr(call[1][0], "kind", None) == "Colors"
+    ]
+    assert color_tracks
+    assert list(color_tracks[0][1][0].args[0]) == [
+        group_by_gene[gene] for gene in plotted_genes
+    ]
+
+
 def test_dynamic_heatmap_var_names_none_prefers_hvg_candidates(simple_adata, stub_marsilea):
     heatmap = dynamic_heatmap(
         simple_adata,
@@ -467,7 +496,6 @@ def test_dynamic_heatmap_var_names_none_prefers_hvg_candidates(simple_adata, stu
 
     plotted = list(heatmap.boards[0].args[0].index)
     assert set(plotted).issubset({"GeneA", "GeneC"})
-
 
 def test_compute_dynamic_feature_metadata_orders_by_earliest_peak():
     """With two lineages, cluster_time must be the MIN peak time across

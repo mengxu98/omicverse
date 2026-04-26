@@ -1666,7 +1666,7 @@ def plot_factors_violin(mdata,
         plot_data['Group'] = np.repeat(groups, len(factor_names))
     
     # Sort factors by number
-    plot_data['Factor_num'] = plot_data['Factor'].str.extract('(\d+)').astype(int)
+    plot_data['Factor_num'] = plot_data['Factor'].str.extract(r'(\d+)').astype(int)
     plot_data = plot_data.sort_values('Factor_num')
     
     # Remove NaN groups from plotting

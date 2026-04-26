@@ -2121,10 +2121,16 @@ def tsne(
     if n_iter is not None:
         kwargs.setdefault("n_iter", n_iter)
     if settings.mode == 'cpu':
-        print(f"{EMOJI['cpu']} Using Scanpy CPU t-SNE...")
-        sc.tl.tsne(adata, **kwargs)
-        add_reference(adata, 'tsne', 't-SNE with scanpy')
-        note(backend=f"omicverse({settings.mode}) · scanpy")
+        # CPU t-SNE goes through our own sklearn-backed wrapper rather
+        # than ``scanpy.tl.tsne`` (which does not accept n_components —
+        # issue #683). Going direct to sklearn means n_components /
+        # n_iter / metric all flow through unchanged regardless of the
+        # installed scanpy version, and CPU users finally get k-D t-SNE.
+        print(f"{EMOJI['cpu']} Using sklearn CPU t-SNE...")
+        from ._tsne_cpu import tsne_cpu
+        tsne_cpu(adata, **kwargs)
+        add_reference(adata, 'tsne', 't-SNE with sklearn')
+        note(backend=f"omicverse({settings.mode}) · sklearn")
     elif settings.mode == 'cpu-gpu-mixed':
         print(f"{EMOJI['mixed']} Using torch CPU/GPU mixed mode to calculate t-SNE...")
         print_gpu_usage_color()

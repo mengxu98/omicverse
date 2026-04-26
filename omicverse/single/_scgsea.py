@@ -447,10 +447,11 @@ def pathway_enrichment(adata, pathways_dict,organism='Human',group_by='louvain',
     
     if pvalue_type=='adjust':
         enrich_res=df[df['Adjusted P-value']<cutoff]
-        enrich_res['logp']=-np.log(enrich_res['Adjusted P-value'])
+        # base 10 to match the colour-bar label '−Log10(P_adjusted)' (issue #685)
+        enrich_res['logp']=-np.log10(enrich_res['Adjusted P-value'])
     else:
         enrich_res=df[df['P-value']<cutoff]
-        enrich_res['logp']=-np.log(enrich_res['P-value'])
+        enrich_res['logp']=-np.log10(enrich_res['P-value'])
     enrich_res['logc']=np.log(enrich_res['Odds Ratio'])
     enrich_res['num']=[int(i.split('/')[0]) for i in enrich_res['Overlap']]
     enrich_res['fraction']=[int(i.split('/')[0])/int(i.split('/')[1]) for i in enrich_res['Overlap']]

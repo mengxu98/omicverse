@@ -91,16 +91,17 @@ def geneset_enrichment(gene_list:list,pathways_dict:dict,
     if pvalue_type=='auto':
         if enr.res2d.shape[0]>100:
             enrich_res=enr.res2d[enr.res2d['Adjusted P-value']<pvalue_threshold]
-            enrich_res['logp']=-np.log(enrich_res['Adjusted P-value'])
+            # base 10 to match the colour-bar label '−Log10(P_adjusted)' (issue #685)
+            enrich_res['logp']=-np.log10(enrich_res['Adjusted P-value'])
         else:
             enrich_res=enr.res2d[enr.res2d['P-value']<pvalue_threshold]
-            enrich_res['logp']=-np.log(enrich_res['P-value'])
+            enrich_res['logp']=-np.log10(enrich_res['P-value'])
     elif pvalue_type=='adjust':
         enrich_res=enr.res2d[enr.res2d['Adjusted P-value']<pvalue_threshold]
-        enrich_res['logp']=-np.log(enrich_res['Adjusted P-value'])
+        enrich_res['logp']=-np.log10(enrich_res['Adjusted P-value'])
     else:
         enrich_res=enr.res2d[enr.res2d['P-value']<pvalue_threshold]
-        enrich_res['logp']=-np.log(enrich_res['P-value'])
+        enrich_res['logp']=-np.log10(enrich_res['P-value'])
     enrich_res['logc']=np.log(enrich_res['Odds Ratio'])
     enrich_res['num']=[int(i.split('/')[0]) for i in enrich_res['Overlap']]
     enrich_res['fraction']=[int(i.split('/')[0])/int(i.split('/')[1]) for i in enrich_res['Overlap']]
@@ -166,7 +167,8 @@ def geneset_enrichment_GSEA(gene_rnk:pd.DataFrame,pathways_dict:dict,
                      outdir=outdir, format=format, seed=seed)
     return pre_res
     enrich_res=pre_res.res2d[pre_res.res2d['fdr']<0.05]
-    enrich_res['logp']=-np.log(enrich_res['fdr']+0.0001)
+    # base 10 to match the colour-bar label '−Log10(P_adjusted)' (issue #685)
+    enrich_res['logp']=-np.log10(enrich_res['fdr']+0.0001)
     enrich_res['logc']=enrich_res['nes']
     enrich_res['num']=enrich_res['matched_size']
     enrich_res['fraction']=enrich_res['matched_size']/enrich_res['geneset_size']
@@ -558,7 +560,8 @@ class pyGSEA(object):
                                            self.outdir,format,seed)
         self.pre_res=pre_res
         enrich_res=pre_res.res2d[pre_res.res2d['fdr']<pval]
-        enrich_res['logp']=-np.log(enrich_res['fdr']+0.0001)
+        # base 10 to match the colour-bar label '−Log10(P_adjusted)' (issue #685)
+        enrich_res['logp']=-np.log10(enrich_res['fdr']+0.0001)
         enrich_res['logc']=enrich_res['nes']
         enrich_res['num']=enrich_res['matched_size']
         enrich_res['fraction']=enrich_res['matched_size']/enrich_res['geneset_size']

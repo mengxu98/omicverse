@@ -8,6 +8,48 @@ from matplotlib.colors import ListedColormap
 from matplotlib.gridspec import GridSpec
 from .._registry import register_function
 
+def to_rgb_grayscale(img, p_low: float = 1.0, p_high: float = 99.0):
+    """Convert a 2-D grayscale image to a percentile-clipped RGB stack.
+
+    matplotlib's ``imshow`` applies a default *viridis* colormap to 2-D
+    arrays. When the image is a morphology stain (DAPI, membrane, RNA) and
+    we want it rendered as true grayscale alongside polygon overlays, this
+    silently colour-maps the channel and washes structural detail into a
+    uniform purple-to-yellow ramp. Passing a 3-channel array bypasses the
+    colormap entirely so the intensities are rendered verbatim.
+
+    The percentile clip handles long-tailed stain distributions: a few
+    bright outliers would otherwise compress the dynamic range of the rest
+    of the image to nearly black.
+
+    Parameters
+    ----------
+    img : np.ndarray
+        2-D image of any numeric dtype.
+    p_low, p_high : float
+        Percentile clip range over the image's *non-zero* pixels.
+        Defaults: 1st / 99th percentiles.
+
+    Returns
+    -------
+    np.ndarray
+        ``(H, W, 3)`` float32 array in the [0, 1] range. Suitable to drop
+        directly into ``adata.uns['spatial'][lib]['images'][<key>]`` or
+        passed to ``imshow`` without a ``cmap`` kwarg.
+    """
+    arr = np.asarray(img, dtype=np.float32)
+    nz = arr[arr > 0]
+    if nz.size:
+        lo = float(np.percentile(nz, p_low))
+        hi = float(np.percentile(nz, p_high))
+    else:
+        lo, hi = 0.0, 1.0
+    if hi <= lo:
+        hi = lo + 1.0
+    arr = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    return np.stack([arr, arr, arr], axis=-1)
+
+
 def html_to_rgb(html_color):
     r"""
     Convert HTML hex color code to RGB tuple.

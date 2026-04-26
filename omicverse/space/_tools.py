@@ -29,6 +29,61 @@ from .._optional import build_optional_dependency_error
     ],
     related=["space.rotate_space_visium", "space.map_spatial_auto"]
 )
+@register_function(
+    aliases=["subset_window", "spatial_window", "spatial_subset",
+             "crop spatial subset", "空间窗口子集"],
+    category="space",
+    description=(
+        "Subset an AnnData to cells whose `obsm[basis]` coordinates fall inside "
+        "a rectangular (xlim, ylim) window. Coordinate-system agnostic: works on "
+        "microns (Xenium / Atera), full-res pixels (Visium HD), or any other 2-D "
+        "embedding. Preserves `uns`."
+    ),
+    examples=[
+        "bdata = ov.space.subset_window(adata, xlim=(1000, 2000), ylim=(500, 1500))",
+        "# Window centred on the sample median:",
+        "import numpy as np",
+        "x0, y0 = np.median(adata.obsm['spatial'], axis=0)",
+        "bdata = ov.space.subset_window(adata,",
+        "    xlim=(x0 - 500, x0 + 500),",
+        "    ylim=(y0 - 500, y0 + 500))",
+    ],
+    related=["space.crop_space_visium"],
+)
+def subset_window(adata, xlim, ylim, basis='spatial'):
+    """Subset an AnnData by a rectangular spatial window.
+
+    Cells whose ``adata.obsm[basis]`` coordinates fall inside ``(xlim, ylim)``
+    are kept; the rest are dropped. The interval is half-open
+    (``xlim[0] <= x < xlim[1]``), matching numpy slicing semantics.
+
+    Coordinates are interpreted in whatever unit the basis stores — microns
+    for Xenium / Atera, full-res pixels for Visium HD. Use the same window
+    you intend to pass to ``ov.pl.spatial(crop_coord=...)`` /
+    ``ov.pl.spatialseg(crop_coord=...)`` so the polygon set and the rendered
+    background stay aligned.
+
+    Parameters
+    ----------
+    adata : AnnData
+    xlim : tuple of float
+        ``(x_min, x_max)`` window, half-open on the right.
+    ylim : tuple of float
+        ``(y_min, y_max)`` window, half-open on the right.
+    basis : str
+        Key in ``adata.obsm`` providing the 2-D coordinates. Default ``'spatial'``.
+
+    Returns
+    -------
+    AnnData
+        Copy of ``adata`` restricted to the window. ``uns`` is preserved.
+    """
+    coords = adata.obsm[basis]
+    x, y = coords[:, 0], coords[:, 1]
+    mask = (x >= xlim[0]) & (x < xlim[1]) & (y >= ylim[0]) & (y < ylim[1])
+    return adata[mask].copy()
+
+
 def crop_space_visium(adata, crop_loc, crop_area,
                      library_id, scale, spatial_key='spatial', res='hires'):
     """

@@ -69,6 +69,7 @@ from ._palette import (
     purple_color,
     red_color,
     sc_color,
+    sync_categorical_palette,
     vibrant_palette,
     palplot,
 )
@@ -132,6 +133,7 @@ from ._space import (
     rgb_to_ryb,
     ryb_to_rgb,
     spatial_value,
+    to_rgb_grayscale,
 )
 from ._cpdb import (
     cpdb_chord,

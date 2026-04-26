@@ -98,6 +98,52 @@ pastel_palette = [
     '#FFD3B5', '#D4F0F0', '#B5EAD7', '#E2F0CB', '#C7CEEA', '#FFDAC1'
 ]
 
+def sync_categorical_palette(adata, key: str, color_obs: str,
+                             default: str = '#bbbbbb') -> list:
+    r"""Wire a per-cell colour column into ``uns[<key>_colors]``.
+
+    scanpy / ov.pl plotting functions read ``uns[<obs_key>_colors]`` as a
+    list of hex strings aligned with ``adata.obs[obs_key].cat.categories``.
+    When a vendor or upstream classifier ships per-cell colours in a
+    parallel obs column (e.g. Atera's ``cell_groups.csv`` ships both a
+    ``cell_group`` label and a ``cell_group_color`` hex per cell), this
+    helper turns the two parallel columns into the per-category palette
+    plot functions expect.
+
+    Cells whose colour is missing fall back to ``default``. Cells whose
+    *category* is missing from the data (i.e. categories that no cell
+    actually belongs to) are dropped from the mapping before lookup, so
+    a stray NaN never becomes the literal string ``'nan'`` and breaks
+    matplotlib's colour parser.
+
+    Parameters
+    ----------
+    adata : AnnData
+    key : str
+        Categorical obs column. Must be ``pd.Categorical`` so
+        ``cat.categories`` defines the palette order.
+    color_obs : str
+        Obs column with per-cell hex colour strings parallel to
+        ``adata.obs[key]``.
+    default : str
+        Fallback hex colour for categories without a mapped colour.
+        Default ``'#bbbbbb'``.
+
+    Returns
+    -------
+    list of str
+        The palette written to ``adata.uns[f'{key}_colors']``.
+    """
+    g = adata.obs[key].astype(object)
+    c = adata.obs[color_obs].astype(object)
+    tab = pd.DataFrame({key: g, color_obs: c}).dropna().drop_duplicates()
+    mapping = dict(zip(tab[key], tab[color_obs]))
+    cats = adata.obs[key].cat.categories
+    palette = [mapping.get(cat, default) for cat in cats]
+    adata.uns[f'{key}_colors'] = palette
+    return palette
+
+
 def colormaps_palette(map_name:str)->list:
     r"""Returns a colormap palette.
 

@@ -265,16 +265,25 @@ class SCENIC:
             
             self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)
             self.adjacencies = self.edgelist
-        elif method=='grnboost2': 
+        elif method=='grnboost2':
             from ..external.single.arboreto.algo import grnboost2
+            # arboreto's _prepare_input requires `gene_names` whenever
+            # ``expression_data`` is a numpy / sparse matrix (issue #681).
+            # We hold a dense ndarray at this point, so pass var_names
+            # explicitly — otherwise the inner assertion blows up with
+            # ``TypeError: object of type 'NoneType' has no len()``.
             edgelist = grnboost2(expression_data=x,
+                    gene_names=self.adata.var_names.tolist(),
                     tf_names=tf_names)
             self.edgelist = edgelist
             self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)
             self.adjacencies = self.edgelist
         elif method=='genie3':
             from ..external.single.arboreto.algo import genie3
+            # Same as grnboost2 above — arboreto can't infer gene names
+            # from a bare ndarray (issue #681).
             edgelist = genie3(expression_data=x,
+                    gene_names=self.adata.var_names.tolist(),
                     tf_names=tf_names)
             self.edgelist = edgelist
             self.edgelist['importance']=self.edgelist['importance'].astype(np.float32)

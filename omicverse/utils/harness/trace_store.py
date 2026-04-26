@@ -41,7 +41,7 @@ class RunTraceStore:
     """Filesystem-backed store for run traces and cleanup reports."""
 
     def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = root or (Path.home() / ".ovagent" / "harness")
+        from .._ovagent_paths import ovagent_home as _oh; self.root = root or (_oh() / "harness")
         self.traces_dir = self.root / "traces"
         self.reports_dir = self.root / "reports"
         self.traces_dir.mkdir(parents=True, exist_ok=True)

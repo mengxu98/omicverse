@@ -47,7 +47,7 @@ class CellOntologyMapper:
     🧬 Cell ontology mapping class using NLP
     """
     
-    def __init__(self, cl_obo_file=None, embeddings_path=None, model_name="all-mpnet-base-v2", local_model_dir=None):
+    def __init__(self, cl_obo_file=None, embeddings_path=None, model_name="all-mpnet-base-v2", local_model_dir=None, auto_download=True):
         """
         🚀 Initialize CellOntologyMapper
         
@@ -93,6 +93,17 @@ class CellOntologyMapper:
         elif cl_obo_file and os.path.exists(cl_obo_file):
             print("🔨 Creating ontology resources from OBO file...")
             self.create_ontology_resources(cl_obo_file)
+        elif cl_obo_file and auto_download:
+            from pathlib import Path
+            target_dir = str(Path(cl_obo_file).parent) or "new_ontology"
+            target_name = Path(cl_obo_file).name
+            print(f"📥 Cell Ontology file '{cl_obo_file}' missing; "
+                  f"auto-downloading via ov.single.download_cl()...")
+            downloaded = download_cl(output_dir=target_dir, filename=target_name)
+            if os.path.exists(downloaded):
+                self.create_ontology_resources(downloaded)
+            else:
+                print("?  download_cl returned but file missing; init empty mapper.")
         else:
             print("?  Initialized empty mapper, please use load_embeddings() or create_ontology_resources()")
     

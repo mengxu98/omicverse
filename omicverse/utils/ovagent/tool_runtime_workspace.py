@@ -173,7 +173,7 @@ def handle_enter_worktree(
             path, allow_relative=True
         )
     else:
-        worktree_root = Path.home() / ".ovagent" / "worktrees"
+        from .._ovagent_paths import ovagent_home as _oh; worktree_root = _oh() / "worktrees"
         worktree_root.mkdir(parents=True, exist_ok=True)
         worktree_path = worktree_root / branch.replace("/", "_")
     ctx._request_tool_approval(

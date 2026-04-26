@@ -785,6 +785,22 @@ def qc_cpu_gpu_mixed(adata:anndata.AnnData, mode='seurat',
         adata.obs['detected_genes'] = np.count_nonzero(adata.X, axis=1)
     adata.obs['cell_complexity'] = adata.obs['detected_genes'] / adata.obs['nUMIs']
 
+    # Scanpy-convention aliases — let LLM-generated code that follows scanpy
+    # tutorials (`adata.obs['pct_counts_mt']`, `adata.obs['n_counts']`,
+    # `adata.obs['total_counts']`, `adata.obs['n_genes']`) work without
+    # KeyError. ov uses 'mito_perc'/'nUMIs'/'detected_genes' internally;
+    # we mirror the values under standard scanpy names so both call styles
+    # succeed. Cheap (no data duplication, just dict assignment).
+    adata.obs['n_counts']        = adata.obs['nUMIs']
+    adata.obs['total_counts']    = adata.obs['nUMIs']
+    adata.obs['n_genes']         = adata.obs['detected_genes']
+    adata.obs['n_genes_by_counts'] = adata.obs['detected_genes']
+    adata.obs['pct_counts_mt']   = adata.obs['mito_perc']
+    if 'ribo_perc' in adata.obs.columns:
+        adata.obs['pct_counts_ribo'] = adata.obs['ribo_perc']
+    if 'hb_perc' in adata.obs.columns:
+        adata.obs['pct_counts_hb']   = adata.obs['hb_perc']
+
     # Display QC statistics in table format
     _print_qc_metrics_table(adata)
 
@@ -1171,6 +1187,22 @@ def qc_cpu(
         adata.obs['detected_genes'] = np.count_nonzero(adata.X, axis=1)
     adata.obs['cell_complexity'] = adata.obs['detected_genes'] / adata.obs['nUMIs']
 
+    # Scanpy-convention aliases — let LLM-generated code that follows scanpy
+    # tutorials (`adata.obs['pct_counts_mt']`, `adata.obs['n_counts']`,
+    # `adata.obs['total_counts']`, `adata.obs['n_genes']`) work without
+    # KeyError. ov uses 'mito_perc'/'nUMIs'/'detected_genes' internally;
+    # we mirror the values under standard scanpy names so both call styles
+    # succeed. Cheap (no data duplication, just dict assignment).
+    adata.obs['n_counts']        = adata.obs['nUMIs']
+    adata.obs['total_counts']    = adata.obs['nUMIs']
+    adata.obs['n_genes']         = adata.obs['detected_genes']
+    adata.obs['n_genes_by_counts'] = adata.obs['detected_genes']
+    adata.obs['pct_counts_mt']   = adata.obs['mito_perc']
+    if 'ribo_perc' in adata.obs.columns:
+        adata.obs['pct_counts_ribo'] = adata.obs['ribo_perc']
+    if 'hb_perc' in adata.obs.columns:
+        adata.obs['pct_counts_hb']   = adata.obs['hb_perc']
+
     # Display QC statistics in table format
     _print_qc_metrics_table(adata)
 
@@ -1546,6 +1578,22 @@ def qc_gpu(adata, mode='seurat',
     adata.obs['hb_perc'] = adata.obs['pct_counts_hb']/100
     adata.obs['detected_genes'] = adata.obs['n_genes_by_counts']
     adata.obs['cell_complexity'] = adata.obs['detected_genes'] / adata.obs['nUMIs']
+
+    # Scanpy-convention aliases — let LLM-generated code that follows scanpy
+    # tutorials (`adata.obs['pct_counts_mt']`, `adata.obs['n_counts']`,
+    # `adata.obs['total_counts']`, `adata.obs['n_genes']`) work without
+    # KeyError. ov uses 'mito_perc'/'nUMIs'/'detected_genes' internally;
+    # we mirror the values under standard scanpy names so both call styles
+    # succeed. Cheap (no data duplication, just dict assignment).
+    adata.obs['n_counts']        = adata.obs['nUMIs']
+    adata.obs['total_counts']    = adata.obs['nUMIs']
+    adata.obs['n_genes']         = adata.obs['detected_genes']
+    adata.obs['n_genes_by_counts'] = adata.obs['detected_genes']
+    adata.obs['pct_counts_mt']   = adata.obs['mito_perc']
+    if 'ribo_perc' in adata.obs.columns:
+        adata.obs['pct_counts_ribo'] = adata.obs['ribo_perc']
+    if 'hb_perc' in adata.obs.columns:
+        adata.obs['pct_counts_hb']   = adata.obs['hb_perc']
 
     # Display QC statistics in table format
     _print_qc_metrics_table(adata)

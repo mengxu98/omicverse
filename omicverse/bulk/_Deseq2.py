@@ -25,19 +25,41 @@ from ..pl import volcano
     ],
     related=["bulk.deseq2_normalize", "utils.gene_symbol_to_ensembl", "pp.filter_genes"]
 )
-def Matrix_ID_mapping(data:pd.DataFrame,gene_ref_path:str,keep_unmapped:bool=True)->pd.DataFrame:
+def Matrix_ID_mapping(data:pd.DataFrame,gene_ref_path:str,keep_unmapped:bool=True,
+                      auto_download:bool=True)->pd.DataFrame:
     r"""Map gene IDs in the input data to gene symbols using a reference table.
 
     Arguments:
         data: The input data containing gene IDs as index.
         gene_ref_path: The path to the reference table containing the mapping from gene IDs to gene symbols.
         keep_unmapped: Whether to keep genes that are not found in the mapping table. If True, unmapped genes retain their original IDs. If False, unmapped genes are removed (original behavior). Default: True.
+        auto_download: If the reference at ``gene_ref_path`` is missing AND its
+            basename matches a known omicverse pair (``pair_GRCh38.tsv``,
+            ``pair_GRCh37.tsv``, ``pair_GRCm39.tsv``, ``pair_danRer11.tsv``),
+            call :func:`ov.utils.download_geneid_annotation_pair` to fetch the
+            standard pairs into ``./genesets/`` and resolve from there.
 
     Returns:
         data: The input data with gene IDs mapped to gene symbols.
 
     """
-    
+
+    import os
+    if auto_download and not os.path.exists(gene_ref_path):
+        known_pairs = {
+            'pair_GRCh38.tsv', 'pair_GRCh37.tsv',
+            'pair_GRCm39.tsv', 'pair_danRer11.tsv',
+        }
+        basename = os.path.basename(gene_ref_path)
+        if basename in known_pairs:
+            from ..utils._data import download_geneid_annotation_pair
+            print(f"......Gene-ID pair '{basename}' missing locally; "
+                  f"auto-downloading via ov.utils.download_geneid_annotation_pair()...")
+            download_geneid_annotation_pair()
+            cand = os.path.join('./genesets', basename)
+            if os.path.exists(cand):
+                gene_ref_path = cand
+
     pair=pd.read_csv(gene_ref_path,sep='\t',index_col=0)
     
     if keep_unmapped:

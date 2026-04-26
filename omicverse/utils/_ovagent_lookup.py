@@ -93,16 +93,36 @@ class _SkillLookupContext:
         )
 
 
+_SCANNER_CACHE: RegistryScanner | None = None
+_SKILL_REGISTRY_CACHE: Any | None = None
+
+
 def _create_registry_scanner() -> RegistryScanner:
-    scanner = RegistryScanner()
-    scanner.ensure_runtime_registry()
-    scanner.load_static_entries()
-    return scanner
+    """Return a cached, fully-loaded ``RegistryScanner``.
+
+    The scanner walks the entire ``omicverse/`` source tree and AST-parses
+    every registered function — ~10 s on first call. Without caching,
+    every ``registry_lookup`` call repeats that work, which dominates
+    agent latency far more than LLM inference does. The cache lasts for
+    the process lifetime; scanner state is read-only at this layer, so
+    sharing it across calls is safe.
+    """
+
+    global _SCANNER_CACHE
+    if _SCANNER_CACHE is None:
+        scanner = RegistryScanner()
+        scanner.ensure_runtime_registry()
+        scanner.load_static_entries()
+        _SCANNER_CACHE = scanner
+    return _SCANNER_CACHE
 
 
 def _create_skill_registry() -> Any:
-    registry, _ = initialize_skill_registry()
-    return registry
+    global _SKILL_REGISTRY_CACHE
+    if _SKILL_REGISTRY_CACHE is None:
+        registry, _ = initialize_skill_registry()
+        _SKILL_REGISTRY_CACHE = registry
+    return _SKILL_REGISTRY_CACHE
 
 
 def _delegate_registry_lookup(ctx: Any, query: str) -> str:

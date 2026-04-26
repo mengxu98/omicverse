@@ -452,10 +452,55 @@ class FunctionRegistry:
 
     @staticmethod
     def _derive_signature_from_ast(node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> str:
-        arg_names = [arg.arg for arg in node.args.args]
-        if arg_names and arg_names[0] == "self":
-            arg_names = arg_names[1:]
-        return f"({', '.join(arg_names)})"
+        """Derive a docstring-style signature from an AST node.
+
+        Includes positional args (with defaults) **and** keyword-only args
+        (with defaults). The latter were missing previously, which hid the
+        ``mode=`` / ``doublets_method=`` / ``flavor=`` style dispatch
+        parameters from ``registry_lookup`` output. Without those, agents
+        searching for e.g. ``"scdblfinder"`` would see ``ov.pp.qc(adata)``
+        and never realise the function dispatches via
+        ``doublets_method='scdblfinder'``.
+        """
+        params: list[str] = []
+
+        # Positional args (skip ``self`` if present).
+        arg_names = list(node.args.args)
+        defaults = list(node.args.defaults)
+        offset = len(arg_names) - len(defaults)
+        for idx, arg in enumerate(arg_names):
+            if idx == 0 and arg.arg == "self":
+                continue
+            p = arg.arg
+            if idx >= offset:
+                d = defaults[idx - offset]
+                try:
+                    p += "=" + repr(ast.literal_eval(d))
+                except Exception:
+                    pass
+            params.append(p)
+
+        # ``*args`` separator if there are kwonly args without a vararg.
+        if node.args.kwonlyargs and node.args.vararg is None:
+            params.append("*")
+        elif node.args.vararg is not None:
+            params.append("*" + node.args.vararg.arg)
+
+        # Keyword-only args (with defaults). This is the fix for the
+        # dispatch-parameter visibility issue.
+        for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+            p = arg.arg
+            if default is not None:
+                try:
+                    p += "=" + repr(ast.literal_eval(default))
+                except Exception:
+                    pass
+            params.append(p)
+
+        if node.args.kwarg is not None:
+            params.append("**" + node.args.kwarg.arg)
+
+        return f"({', '.join(params)})"
 
     @staticmethod
     def _parameters_from_ast(node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> List[str]:

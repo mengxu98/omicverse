@@ -61,18 +61,38 @@ def test_modified_backend_helpers_are_wired_to_call_sites():
 def test_bulk_lazy_exports_are_preserved():
     bulk_init_tree = _parse("omicverse/bulk/__init__.py")
     bulk_gene_tree = _parse("omicverse/bulk/_Gene_module.py")
+    bulk_wgcna_tree = _parse("omicverse/bulk/_wgcna.py")
     bulk_init_source = _read("omicverse/bulk/__init__.py")
+    bulk_wgcna_source = _read("omicverse/bulk/_wgcna.py")
 
     bulk_init_strings = _string_literals(bulk_init_tree)
     bulk_gene_strings = _string_literals(bulk_gene_tree)
+    bulk_wgcna_strings = _string_literals(bulk_wgcna_tree)
 
     assert "pyWGCNA" in bulk_init_strings
     assert "readWGCNA" in bulk_init_strings
-    assert "from . import _Gene_module as gene_module" in bulk_init_source
+    # bulk.__getattr__ now lazy-routes pyWGCNA / readWGCNA through the
+    # registry-discoverable `_wgcna` shim (PR #700) instead of the legacy
+    # `_Gene_module`. The shim adds @register_function metadata that the
+    # registry scanner indexes; runtime behaviour is unchanged.
+    assert "from . import _wgcna" in bulk_init_source
 
+    # The legacy `_Gene_module` is still present and still wires the
+    # backend helper — keep that contract pinned even though it's no
+    # longer the canonical lazy entry-point.
     assert "pyWGCNA" in bulk_gene_strings
     assert "readWGCNA" in bulk_gene_strings
     assert "_get_pywgcna_backend" in _function_calls(bulk_gene_tree)
+
+    # The new shim is what `bulk.__getattr__` reaches now: it must
+    # expose the same two symbols and lazy-import the upstream
+    # `external.PyWGCNA` impl so `import omicverse.bulk` stays cheap.
+    # (Module-import paths aren't AST string constants, so the lazy
+    # contract is asserted against the raw source text.)
+    assert "pyWGCNA" in bulk_wgcna_strings
+    assert "readWGCNA" in bulk_wgcna_strings
+    assert "from ..external.PyWGCNA.wgcna import pyWGCNA" in bulk_wgcna_source
+    assert "from ..external.PyWGCNA.utils import readWGCNA" in bulk_wgcna_source
 
 
 def test_single_lazy_exports_are_preserved():

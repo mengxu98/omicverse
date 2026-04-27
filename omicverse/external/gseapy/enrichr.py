@@ -20,17 +20,17 @@ from typing import Tuple, Union, List, Dict, Iterable, Optional
 
 class Enrichr(object):
     """Enrichr API"""
-    def __init__(self, gene_list: Iterable[str], 
-                 gene_sets: Union[List[str],str,Dict[str,str]], 
-                 organism: str='human', 
+    def __init__(self, gene_list: Iterable[str],
+                 gene_sets: Union[List[str],str,Dict[str,str]],
+                 organism: str='human',
                  descriptions: Optional[str]='',
-                 outdir: Optional[str]='Enrichr', 
-                 cutoff: float=0.05, 
-                 background: Union[List[str],int,str] ='hsapiens_gene_ensembl',
-                 format: str='pdf', 
-                 figsize: Tuple[float, float] =(6.5,6), 
-                 top_term: int =10, 
-                 no_plot: bool=False, 
+                 outdir: Optional[str]='Enrichr',
+                 cutoff: float=0.05,
+                 background: Union[List[str],int,str,None] = None,
+                 format: str='pdf',
+                 figsize: Tuple[float, float] =(6.5,6),
+                 top_term: int =10,
+                 no_plot: bool=False,
                  verbose: bool=False):
 
         self.gene_list = gene_list
@@ -281,7 +281,7 @@ class Enrichr(object):
                 ),
             )
         self._logger.info("Using all annotated genes with GO_ID as background: %s"%self.background)
-        df.dropna(subset=['entrezgene_id'], inplace=True)     
+        df.dropna(subset=['entrezgene_id'], inplace=True)
         # input id type: entrez or gene_name
         if self._isezid:
             bg = df['entrezgene_id'].astype(int)
@@ -370,22 +370,45 @@ class Enrichr(object):
             Term Overlap P-value Adjusted_P-value Genes
 
         """
-        if isscalar(self.background):
-            if isinstance(self.background, int) or self.background.isdigit():
+        # Background resolution — backport of upstream gseapy
+        # ``parse_background`` (zqfang/GSEApy master). When ``background`` is
+        # ``None`` we now default to the union of genes across the local
+        # gene-set dict instead of triggering an Ensembl BioMart MySQL
+        # query. Ensembl's mart backend (``ensembl_mart_115``) is known to
+        # return DBI errors intermittently, which used to crash the whole
+        # enrichment call. This branch makes ``geneset_enrichment`` work
+        # offline and survive Ensembl outages.
+        if self.background is None:
+            if gmt:
+                bg = set()
+                for _, genes in gmt.items():
+                    bg.update(genes)
+                self._bg = bg
+                self._logger.info(
+                    "Background not set; using all %d genes in the gene-set "
+                    "dict as background." % len(bg)
+                )
+            else:
+                self._bg = set()
+        elif isscalar(self.background):
+            if isinstance(self.background, int) or (
+                isinstance(self.background, str) and self.background.isdigit()
+            ):
                 self._bg = int(self.background)
             elif isinstance(self.background, str):
-                # self.background = set(reduce(lambda x,y: x+y, gmt.values(),[]))
+                # File path or BioMart dataset name — go through get_background.
                 self._bg = self.get_background()
-                self._logger.info("Background: found %s genes"%(len(self._bg)))
+                self._logger.info("Background: found %s genes" % (len(self._bg)))
             else:
                 raise Exception("Unsupported background data type")
         else:
             # handle array object: nd.array, list, tuple, set, Series
             try:
-                it = iter(self.background)
+                _ = iter(self.background)
                 self._bg = set(self.background)
             except TypeError:
                 self._logger.error("Unsupported background data type")
+                raise Exception("Unsupported background data type")
         # statistical testing
         hgtest = list(calc_pvalues(query=self._gls, gene_sets=gmt, 
                                    background=self._bg))
@@ -461,7 +484,7 @@ class Enrichr(object):
 
 
 def enrichr(gene_list, gene_sets, organism='human', description='',
-            outdir='Enrichr', background='hsapiens_gene_ensembl', cutoff=0.05,
+            outdir='Enrichr', background=None, cutoff=0.05,
             format='pdf', figsize=(8,6), top_term=10, no_plot=False, verbose=False):
     """Enrichr API.
 

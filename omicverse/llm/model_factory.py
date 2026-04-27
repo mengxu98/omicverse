@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, Union, List
 from pathlib import Path
 import numpy as np
 
+from .._registry import register_function
 from .base import SCLLMBase
 
 
@@ -185,14 +186,60 @@ class ModelFactory:
         cls._models[model_type.lower()] = model_class
 
 
+@register_function(
+    aliases=[
+        # Direct manager / class names
+        "SCLLMManager", "scllm manager",
+        # Foundation-model / single-cell language model identifiers — narrow
+        # so that generic queries like "cell type annotation" or "batch
+        # integration" go to the canonical scanpy / ov.single.Annotation /
+        # ov.pp.batch_correction wrappers, and only foundation-model-explicit
+        # queries land here.
+        "single-cell foundation model", "single cell foundation model",
+        "single-cell language model", "scLLM", "scllm",
+        "foundation model annotate", "foundation model annotation",
+        "foundation model embedding", "foundation model integration",
+        "foundation model perturbation", "foundation model fine-tune",
+        "zero-shot foundation model",
+        "scgpt", "geneformer", "scfoundation", "uce", "cellplm", "tabula",
+        "scbert", "scmulan", "tgpt", "cellfm", "sccello",
+        "scgpt annotate", "geneformer annotate", "cellplm annotate",
+        "scgpt embedding", "geneformer embedding", "cellplm embedding",
+        # Chinese
+        "单细胞基础模型", "单细胞大模型", "scGPT 注释", "Geneformer 注释",
+    ],
+    category="llm",
+    description=(
+        "High-level manager for single-cell foundation models (RECOMMENDED entry "
+        "point for scGPT, Geneformer, scFoundation, UCE, CellPLM, scBERT, scMulan, "
+        "tGPT, CellFM, scCello, Tabula, etc.). Supports cell-type annotation, "
+        "embedding extraction, batch integration, fine-tuning, and perturbation "
+        "prediction through a single object. Each model_type may not implement "
+        "every task — check the model docstring for capabilities."
+    ),
+    requires={"obs": ["gene-expression matrix"], "var": ["gene identifiers"]},
+    produces={"obsm": ["X_<model>"], "obs": ["predicted_celltype (after annotate_cells)"]},
+    auto_fix="none",
+    examples=[
+        "manager = ov.llm.SCLLMManager(model_type='scgpt', model_path='/path/to/scgpt')",
+        "embeddings = manager.get_embeddings(adata)",
+        "result = manager.annotate_cells(adata)",
+        "manager.integrate(adata, batch_key='batch')",
+        "manager.fine_tune(train_adata, valid_adata, task='annotation')",
+    ],
+    related=[
+        "llm.ModelFactory", "single.SCENIC",
+        "single.Annotation",
+    ],
+)
 class SCLLMManager:
     """
     High-level manager for single-cell language models.
-    
+
     This provides the simplest interface for common operations.
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  model_type: str = "scgpt",
                  model_path: Optional[Union[str, Path]] = None,
                  device: Optional[str] = None,

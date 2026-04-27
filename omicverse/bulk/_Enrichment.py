@@ -73,13 +73,11 @@ def geneset_enrichment(gene_list:list,pathways_dict:dict,
         Enrichment result table with statistics and derived plotting columns.
     """
     from ..external.gseapy import enrichr
-    #import gseapy as gp
-    if background is None:
-        if (organism == 'Mouse') or (organism == 'mouse') or (organism == 'mm'):
-            background='mmusculus_gene_ensembl'
-        elif (organism == 'Human') or (organism == 'human') or (organism == 'hs'):
-            background='hsapiens_gene_ensembl'
-
+    # ``background=None`` is now passed straight through to the bundled
+    # gseapy fork. Its ``Enrichr.enrich`` resolves a None background to the
+    # union of genes in ``pathways_dict`` (matches upstream gseapy's
+    # ``parse_background``), avoiding the brittle Ensembl BioMart MySQL
+    # query the previous default triggered.
     enr = enrichr(gene_list=gene_list,
                  gene_sets=pathways_dict,
                  organism=organism, # don't forget to set organism to the one you desired! e.g. Yeast

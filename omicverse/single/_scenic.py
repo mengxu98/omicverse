@@ -98,6 +98,29 @@ class SCENIC:
         if adata.shape[1] > 30000:
             print(f"   {Colors.WARNING}▶ Many genes detected ({adata.shape[1]} genes):{Colors.ENDC}")
             print(f"     {Colors.CYAN}Consider filtering low-expression genes before SCENIC analysis{Colors.ENDC}")
+
+        # Defensive HVG-first reminder. RegDiffusion (the default ``cal_grn``
+        # method) builds a dense ``n_genes × n_genes`` adjacency on the GPU
+        # and OOMs reliably above ~5000 genes on a 80GB card. Loud warn even
+        # if the agent skipped reading the SCENIC skill.
+        import sys as _sys
+        if (adata.shape[1] > 5000
+                and 'highly_variable' not in adata.var.columns):
+            print(
+                f"\n{Colors.FAIL}{Colors.BOLD}[SCENIC] adata has "
+                f"{adata.shape[1]} genes and no `highly_variable` column. "
+                f"RegDiffusion will OOM above ~5000 genes. HVG-subset first:"
+                f"{Colors.ENDC}",
+                file=_sys.stderr,
+            )
+            print(
+                f"{Colors.WARNING}    sc.pp.highly_variable_genes("
+                f"adata, n_top_genes=3000, flavor='seurat_v3', "
+                f"layer='counts')\n"
+                f"    adata = adata[:, adata.var.highly_variable].copy()"
+                f"{Colors.ENDC}",
+                file=_sys.stderr,
+            )
         
         if len(db_fnames) > 10:
             print(f"   {Colors.BLUE}▶ Multiple databases available ({len(db_fnames)}):{Colors.ENDC}")
@@ -254,8 +277,33 @@ class SCENIC:
             print(f"\n{Colors.GREEN}{EMOJI['start']} Starting RegDiffusion training...{Colors.ENDC}")
             print(f"{Colors.CYAN}{'─' * 60}{Colors.ENDC}")
 
-            rd_trainer = rd.RegDiffusionTrainer(x,**kwargs)
-            rd_trainer.train()
+            try:
+                rd_trainer = rd.RegDiffusionTrainer(x, **kwargs)
+                rd_trainer.train()
+            except Exception as exc:
+                # RegDiffusion builds dense ``n_genes × n_genes`` adjacency
+                # matrices on the GPU (or CPU if no CUDA). With raw 20-30k
+                # gene matrices on a 80GB card the most common surface is
+                # ``torch.OutOfMemoryError`` / ``RuntimeError: CUDA out of
+                # memory``. Re-raise with a copy-pastable HVG fix so the
+                # caller (typically an LLM agent) can recover in one turn.
+                err_str = str(exc).lower()
+                if "out of memory" in err_str or "cuda" in err_str:
+                    raise RuntimeError(
+                        f"RegDiffusion ran out of memory on a "
+                        f"{x.shape[0]}-cell × {x.shape[1]}-gene matrix. "
+                        f"This algorithm builds a dense gene × gene "
+                        f"adjacency on the GPU and reliably OOMs above "
+                        f"~5000 genes. HVG-subset first:\n"
+                        f"    sc.pp.highly_variable_genes(adata, "
+                        f"n_top_genes=3000, flavor='seurat_v3', "
+                        f"layer='counts')\n"
+                        f"    adata = adata[:, "
+                        f"adata.var.highly_variable].copy()\n"
+                        f"then re-instantiate ov.single.SCENIC. "
+                        f"Original error: {type(exc).__name__}: {exc}"
+                    ) from exc
+                raise
             grn = rd_trainer.get_grn(self.adata.var_names, top_gene_percentile=50)
 
             # Here for each gene, we are going to extract all edges

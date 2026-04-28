@@ -103,6 +103,7 @@ from ._branch_streamplot import (
     sigmoid_curve,
     tapered_kde,
 )
+from ._trajectory import trajectory, trajectory_overlay, trajectory_tree
 from ._general import (
     add_palue,
     create_transparent_gradient_colormap,
@@ -254,6 +255,9 @@ __all__ = [
     "make_branch_centerline",
     "sigmoid_curve",
     "tapered_kde",
+    "trajectory",
+    "trajectory_overlay",
+    "trajectory_tree",
     "purple_color",
     "red_color",
     "sc_color",

@@ -105,7 +105,9 @@ def test_trajectory_overlay_draws_on_existing_embedding_axis(ordered_mono):
     assert ax.lines
     assert mcolors.same_color(ax.lines[0].get_color(), "#8A8A8A")
     assert ax.lines[0].get_linewidth() == pytest.approx(1.25)
-    assert ax.texts[0].get_fontsize() == pytest.approx(10)
+    branch_labels = [text for text in ax.texts if text.get_text().isdigit()]
+    assert branch_labels
+    assert all(text.get_fontsize() == pytest.approx(10) for text in branch_labels)
     plt.close(fig)
 
 

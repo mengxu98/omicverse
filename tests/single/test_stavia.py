@@ -55,6 +55,18 @@ def _fake_via_backend(captured):
     return types.SimpleNamespace(core=types.SimpleNamespace(VIA=FakeVIA))
 
 
+def _install_fake_pygam(monkeypatch, linear_gam=None):
+    class FakeLinearGAM:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pygam",
+        types.SimpleNamespace(LinearGAM=linear_gam or FakeLinearGAM),
+    )
+
+
 def test_stavia_fit_translates_anndata_keys_and_writes_results(monkeypatch):
     adata = _make_adata()
     captured = {}
@@ -214,8 +226,6 @@ def test_pyvia_lineage_probability_honors_figsize(monkeypatch):
 
 
 def test_via_core_get_gene_expression_uses_shared_legend(monkeypatch):
-    from omicverse.external.VIA import core as via_core
-
     class FakeGAM:
         def __init__(self, *args, **kwargs):
             pass
@@ -232,7 +242,8 @@ def test_via_core_get_gene_expression_uses_shared_legend(monkeypatch):
             y = self.predict(X)
             return np.column_stack([y - 0.05, y + 0.05])
 
-    monkeypatch.setitem(sys.modules, "pygam", types.SimpleNamespace(LinearGAM=FakeGAM))
+    _install_fake_pygam(monkeypatch, FakeGAM)
+    from omicverse.external.VIA import core as via_core
 
     class FakeVIA:
         terminal_clusters = [1, 2]
@@ -382,7 +393,8 @@ def test_stavia_rw2_missing_dependency_message(monkeypatch):
         stavia_mod._load_via_backend(rw2_mode=True)
 
 
-def test_vendored_via_core_has_no_dependency_fallback_helpers():
+def test_vendored_via_core_has_no_dependency_fallback_helpers(monkeypatch):
+    _install_fake_pygam(monkeypatch)
     from omicverse.external.VIA import core as via_core
     from omicverse.external.VIA import utils_via
 

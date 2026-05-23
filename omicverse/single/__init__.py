@@ -80,7 +80,8 @@ from ._scgsea import (
     geneset_aucell_tmp,pathway_aucell_tmp,pathway_aucell_enrichment_tmp,
     pathway_enrichment,pathway_enrichment_plot
 )
-#from ._via import pyVIA,scRNA_hematopoiesis
+from ._via import pyVIA, hematopoiesis
+scRNA_hematopoiesis = hematopoiesis
 from ._atac import atac_concat_get_index,atac_concat_inner,atac_concat_outer
 from ._batch import batch_correction
 from ._diffusionmap import diffmap
@@ -201,7 +202,7 @@ bind_optional_symbols(
     ["TrajInfer", "fle"],
     package=__name__,
     feature="omicverse.single.TrajInfer",
-    dependencies=("torch",),
+    dependencies=("torch", "igraph"),
 )
 
 bind_optional_symbols(
@@ -312,8 +313,9 @@ __all__ = [
     
     # Trajectory and pseudotime analysis
     'StaVIA',
-    #'pyVIA',
-    #'scRNA_hematopoiesis',
+    'pyVIA',
+    'hematopoiesis',
+    'scRNA_hematopoiesis',
     'TrajInfer',
     'fle',
     'diffmap',

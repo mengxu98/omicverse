@@ -1,9 +1,13 @@
 import anndata
+import builtins
+import contextlib
+import math
 import numpy as np
 import scanpy as sc
 import pandas as pd
 
 import igraph as ig
+import matplotlib
 
 from datetime import datetime
 from typing import Union,Tuple
@@ -26,6 +30,81 @@ def _load_via_modules():
         names = getattr(module, "__all__", [name for name in dir(module) if not name.startswith("_")])
         for name in names:
             globals().setdefault(name, getattr(module, name))
+
+
+@contextlib.contextmanager
+def _suppress_via_plots():
+    """Prevent VIA runtime auto-display while preserving its console output."""
+    import matplotlib.pyplot as plt
+
+    existing_figures = set(plt.get_fignums())
+    original_show = plt.show
+
+    def _no_show(*args, **kwargs):
+        return None
+
+    plt.show = _no_show
+    try:
+        yield
+    finally:
+        for figure_number in set(plt.get_fignums()) - existing_figures:
+            plt.close(figure_number)
+        plt.show = original_show
+
+
+def _lineage_probability_ncols(via_object, marker_lineages, ncol=None, nrow=None):
+    if ncol is None and nrow is None:
+        return None
+    if ncol is not None:
+        ncol = int(ncol)
+        if ncol <= 0:
+            raise ValueError("`ncol` must be a positive integer.")
+    if nrow is not None:
+        nrow = int(nrow)
+        if nrow <= 0:
+            raise ValueError("`nrow` must be a positive integer.")
+
+    if marker_lineages:
+        terminal_clusters = set(getattr(via_object, "terminal_clusters", []))
+        n_terminal = len([lineage for lineage in marker_lineages if lineage in terminal_clusters])
+    else:
+        n_terminal = len(getattr(via_object, "terminal_clusters", []))
+    n_terminal = max(int(n_terminal), 1)
+
+    if ncol is None:
+        ncol = math.ceil(n_terminal / nrow)
+    elif nrow is not None and ncol * nrow < n_terminal:
+        raise ValueError("`ncol * nrow` must be large enough for the selected lineages.")
+    return min(ncol, n_terminal)
+
+
+@contextlib.contextmanager
+def _patched_lineage_probability_layout(plot_func, ncol):
+    if ncol is None:
+        yield
+        return
+
+    func_globals = getattr(plot_func, "__globals__", None)
+    if func_globals is None:
+        yield
+        return
+
+    sentinel = object()
+    previous_min = func_globals.get("min", sentinel)
+
+    def _layout_min(*args, **kwargs):
+        if len(args) == 2 and not kwargs and args[0] == 3 and isinstance(args[1], (int, np.integer)):
+            return builtins.min(int(ncol), int(args[1]))
+        return builtins.min(*args, **kwargs)
+
+    func_globals["min"] = _layout_min
+    try:
+        yield
+    finally:
+        if previous_min is sentinel:
+            func_globals.pop("min", None)
+        else:
+            func_globals["min"] = previous_min
 
 @register_function(
     aliases=["造血数据集", "hematopoiesis", "scRNA_hematopoiesis", "造血发育数据", "血细胞发育"],
@@ -265,7 +344,8 @@ class pyVIA(object):
         """
         _load_via_modules()
         self.adata = adata
-        #self.adata_key = adata_key
+        self.adata_key = adata_key
+        self.adata_ncomps = adata_ncomps
         data = adata.obsm[adata_key][:, 0:adata_ncomps]
         embedding=self.adata.obsm[basis]
         true_label=adata.obs[clusters]
@@ -278,7 +358,8 @@ class pyVIA(object):
         
 
         self.model=VIA(data=data,true_label=true_label,
-                 dist_std_local=dist_std_local,jac_std_global=jac_std_global,labels=labels,
+                 edgepruning_clustering_resolution_local=dist_std_local,
+                 edgepruning_clustering_resolution=jac_std_global,labels=labels,
                  keep_all_local_dist=keep_all_local_dist,too_big_factor=too_big_factor,resolution_parameter=resolution_parameter,partition_type=partition_type,small_pop=small_pop,
                  jac_weighted_edges=jac_weighted_edges,knn=knn,n_iter_leiden=n_iter_leiden,random_seed=random_seed,
                  num_threads=num_threads,distance=distance,time_smallpop=time_smallpop,
@@ -287,7 +368,7 @@ class pyVIA(object):
                  is_coarse=is_coarse,csr_full_graph=csr_full_graph,csr_array_locally_pruned=csr_array_locally_pruned,ig_full_graph=ig_full_graph,
                  full_neighbor_array=full_neighbor_array,full_distance_array=full_distance_array,embedding=embedding,df_annot=df_annot,
                  preserve_disconnected_after_pruning=preserve_disconnected_after_pruning,
-                 secondary_annotations=secondary_annotations,pseudotime_threshold_TS=pseudotime_threshold_TS,cluster_graph_pruning_std=cluster_graph_pruning_std,
+                 secondary_annotations=secondary_annotations,pseudotime_threshold_TS=pseudotime_threshold_TS,cluster_graph_pruning=cluster_graph_pruning_std,
                  visual_cluster_graph_pruning=visual_cluster_graph_pruning,neighboring_terminal_states_threshold=neighboring_terminal_states_threshold,num_mcmc_simulations=num_mcmc_simulations,
                  piegraph_arrow_head_width=piegraph_arrow_head_width,
                  piegraph_edgeweight_scalingfactor=piegraph_edgeweight_scalingfactor,max_visual_outgoing_edges=max_visual_outgoing_edges,via_coarse=via_coarse,velocity_matrix=velocity_matrix,
@@ -303,7 +384,8 @@ class pyVIA(object):
         and compute pseudotime for each cell.
         """
 
-        self.model.run_VIA()
+        with _suppress_via_plots():
+            self.model.run_VIA()
         add_reference(self.adata,'VIA','trajectory inference with VIA')
 
     def get_piechart_dict(self,label:int=0,clusters:str='')->dict:
@@ -579,7 +661,8 @@ class pyVIA(object):
     def plot_lineage_probability(self,clusters:str='',basis:str='',via_fine=None, 
                                 idx=None, figsize:tuple=(8,4),
                                 cmap:str='plasma', dpi:int=80, scatter_size =None,
-                                marker_lineages:list = [], fontsize:int=12)->Tuple[matplotlib.figure.Figure,
+                                marker_lineages:list = [], fontsize:int=12,
+                                ncol:int=None, nrow:int=None)->Tuple[matplotlib.figure.Figure,
                                                                                    matplotlib.axes._axes.Axes]:
         """Plot lineage membership probabilities in embedding space.
 
@@ -605,6 +688,11 @@ class pyVIA(object):
             Terminal lineage IDs to display; empty uses all.
         fontsize : int, default=12
             Title font size.
+        ncol : int or None, default=None
+            Number of subplot columns. ``None`` keeps native VIA layout.
+        nrow : int or None, default=None
+            Desired number of subplot rows. When ``ncol`` is omitted, ``ncol``
+            is inferred from selected lineages and ``nrow``.
 
         Returns
         -------
@@ -619,9 +707,14 @@ class pyVIA(object):
             basis=self.basis
         self.adata.obs[clusters]=self.adata.obs[clusters].astype('category')
         embedding=self.adata.obsm[basis]
-        fig, axs = draw_sc_lineage_probability(via_object=self.model,via_fine=via_fine, embedding=embedding,figsize=figsize,
-                                               idx=idx, cmap_name=cmap, dpi=dpi, scatter_size =scatter_size,
-                                            marker_lineages = marker_lineages, fontsize=fontsize)
+        layout_ncol = _lineage_probability_ncols(self.model, marker_lineages, ncol=ncol, nrow=nrow)
+        with _patched_lineage_probability_layout(plot_sc_lineage_probability, layout_ncol):
+            fig, axs = plot_sc_lineage_probability(via_object=self.model, embedding=embedding,
+                                                   idx=idx, cmap_name=cmap, dpi=dpi,
+                                                   scatter_size=scatter_size,
+                                                   marker_lineages=marker_lineages, fontsize=fontsize)
+        if figsize is not None:
+            fig.set_size_inches(*figsize)
         fig.tight_layout()
         return fig, axs
     
@@ -939,8 +1032,9 @@ def draw_trajectory_gams_pyomic(adata,clusters,via_object, via_fine=None, embedd
     #true_label=list(adata.obs[clusters].cat.categories)
     knn = via_fine.knn
     ncomp = via_fine.ncomp
-    if len(via_fine.revised_super_terminal_clusters)>0:
-        final_super_terminal = via_fine.revised_super_terminal_clusters
+    revised_super_terminal_clusters = getattr(via_fine, "revised_super_terminal_clusters", [])
+    if len(revised_super_terminal_clusters)>0:
+        final_super_terminal = revised_super_terminal_clusters
     else: final_super_terminal = via_fine.terminal_clusters
 
     sub_terminal_clusters = via_fine.terminal_clusters
@@ -951,7 +1045,7 @@ def draw_trajectory_gams_pyomic(adata,clusters,via_object, via_fine=None, embedd
 
 
 
-    sc_supercluster_nn = sc_loc_ofsuperCluster_PCAspace(via_object, via_fine, np.arange(0, len(cluster_labels)))
+    sc_supercluster_nn = sc_loc_ofsuperCluster_PCAspace(via_object, np.arange(0, len(cluster_labels)))
     # draw_all_curves. True draws all the curves in the piegraph, False simplifies the number of edges
     # arrow_width_scale_factor: size of the arrow head
     X_dimred = embedding * 1. / np.max(embedding, axis=0)
@@ -1243,7 +1337,7 @@ def draw_piechart_graph_pyomic(adata,clusters,via_object, type_data='pt',
 
     bboxes = getbb(sct, ax)
 
-    ax = plot_edgebundle_viagraph(ax, via_object.hammerbundle_cluster, layout=via_object.graph_node_pos, CSM=via_object.CSM,
+    ax = plot_viagraph_(ax, via_object.hammerbundle_cluster, layout=via_object.graph_node_pos, CSM=via_object.CSM,
                             velocity_weight=via_object.velo_weight, pt=pt, headwidth_bundle=headwidth_arrow,
                             alpha_bundle=alpha_edge,linewidth_bundle=linewidth_edge, edge_color=edge_color)
 
@@ -1313,7 +1407,7 @@ def draw_piechart_graph_pyomic(adata,clusters,via_object, type_data='pt',
         gp_scaling = 1000 / max(group_pop)
 
         group_pop_scale = group_pop * gp_scaling * 0.5
-        ax_i=plot_edgebundle_viagraph(ax_i, via_object.hammerbundle_cluster, layout=via_object.graph_node_pos,CSM=via_object.CSM, velocity_weight=via_object.velo_weight, pt=pt,headwidth_bundle=headwidth_arrow, alpha_bundle=alpha_edge, linewidth_bundle=linewidth_edge, edge_color=edge_color)
+        ax_i=plot_viagraph_(ax_i, via_object.hammerbundle_cluster, layout=via_object.graph_node_pos,CSM=via_object.CSM, velocity_weight=via_object.velo_weight, pt=pt,headwidth_bundle=headwidth_arrow, alpha_bundle=alpha_edge, linewidth_bundle=linewidth_edge, edge_color=edge_color)
 
         im1 = ax_i.scatter(node_pos[:, 0], node_pos[:, 1], s=group_pop_scale, c=pt, cmap=cmap,
                            edgecolors=c_edge,
@@ -1547,7 +1641,7 @@ def draw_clustergraph_pyomic(via_object, type_data='gene', gene_exp='', gene_lis
             else:
                 c_edge.append('gray')
                 l_width.append(0.0)
-        ax_i = plot_edgebundle_viagraph(ax_i, via_object.hammerbundle_cluster, layout=via_object.graph_node_pos, CSM=via_object.CSM,
+        ax_i = plot_viagraph_(ax_i, via_object.hammerbundle_cluster, layout=via_object.graph_node_pos, CSM=via_object.CSM,
                                 velocity_weight=via_object.velo_weight, pt=pt, headwidth_bundle=arrow_head, alpha_bundle=0.4, linewidth_bundle=edgeweight_scale)
         group_pop_scale = .5 * group_pop * 1000 / max(group_pop)
         pos = ax_i.scatter(node_pos[:, 0], node_pos[:, 1], s=group_pop_scale, c=gene_exp[gene_i].values, cmap=cmap,

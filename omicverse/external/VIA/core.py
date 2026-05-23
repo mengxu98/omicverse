@@ -29,11 +29,6 @@ from sklearn.preprocessing import normalize
 import math
 
 
-def _is_missing_rw2_dependency(exc: ImportError) -> bool:
-    missing_name = getattr(exc, "name", "") or str(exc)
-    return any(name in missing_name for name in ("pecanpy", "numba_progress"))
-
-
 
 ### to upload to pip core via2 file
 
@@ -2359,36 +2354,23 @@ class VIA:
 
             #print('try rw2 hitting times setup')
             memory_pt = 2  # 2
-            try:
-                rw2_hittingtimes = _compute_rw2_hittingtimes(
-                    A=adjacency_matrix_ai,
-                    root=new_root_index,
-                    memory=memory_pt,
-                    x_lazy=self.x_lazy,
-                    alpha_teleport=self.alpha_teleport,
-                )
-            except ImportError as exc:
-                if not _is_missing_rw2_dependency(exc):
-                    raise
-                print(
-                    f"{datetime.now()}\tRW2 hitting times require optional packages "
-                    "pecanpy and numba-progress. Using Markov hitting times instead."
-                )
-            else:
-                '''
-                df_sc = pd.DataFrame()
-                df_sc['parc'] = self.labels
-                df_sc['true_time'] = self.time_series_labels
-                df_ = df_sc.groupby(['parc']).mean()
-                df_['via_pt'] = rw2_hittingtimes
-                df_['via_pt'] = df_['via_pt'].fillna(0)
+            rw2_hittingtimes = _compute_rw2_hittingtimes(A=adjacency_matrix_ai, root=new_root_index, memory=memory_pt,
+                                                        x_lazy=self.x_lazy, alpha_teleport=self.alpha_teleport)
+
+            '''
+            df_sc = pd.DataFrame()
+            df_sc['parc'] = self.labels
+            df_sc['true_time'] = self.time_series_labels
+            df_ = df_sc.groupby(['parc']).mean()
+            df_['via_pt'] = rw2_hittingtimes
+            df_['via_pt'] = df_['via_pt'].fillna(0)
 
 
-                correlation = df_['via_pt'].corr(df_['true_time'])
-                print(f'correlation via rw2 pt at memory q={memory} before scaling, {correlation}')
-                '''
-                print(f'memory for rw2 hittings times  {memory_pt}. Using rw2 based pt')
-                markov_hitting_times_ai = rw2_hittingtimes
+            correlation = df_['via_pt'].corr(df_['true_time'])
+            print(f'correlation via rw2 pt at memory q={memory} before scaling, {correlation}')
+            '''
+            print(f'memory for rw2 hittings times  {memory_pt}. Using rw2 based pt')
+            markov_hitting_times_ai = rw2_hittingtimes
 
             # print('no rw2')
             # print('skip scaling of pt')
@@ -2484,40 +2466,18 @@ class VIA:
                 memory = self.memory
                 p_memory = self.p_memory
 
-                try:
-                    prob_lin_rw2 = _compute_rw2_lineageprobability(A=adjacency_matrix2_ai, memory=memory,
-                                                                  root=new_root_index,
-                                                                  terminal_states=terminal_clus_ai, x_lazy=self.x_lazy,
-                                                                  alpha_teleport=self.alpha_teleport)
-                except ImportError as exc:
-                    if not _is_missing_rw2_dependency(exc):
-                        raise
-                    print(
-                        f"{datetime.now()}\tRW2 lineage probabilities require optional packages "
-                        "pecanpy and numba-progress. Using Markov lineage probabilities instead."
-                    )
-                    for target_terminal in terminal_clus_ai:
-                        prob_ai = self.simulate_branch_probability(target_terminal,
-                                                                   adjacency_matrix2_ai,
-                                                                   new_root_index,
-                                                                   num_sim=int(self.num_mcmc_simulations / 2))
-                        print(f'terminal state {target_terminal} has probability {prob_ai}')
-                        df_graph['terminal_clus' + str(cluster_labels_subi[target_terminal])] = 0.0000000
+                prob_lin_rw2 = _compute_rw2_lineageprobability(A=adjacency_matrix2_ai, memory=memory,
+                                                              root=new_root_index,
+                                                              terminal_states=terminal_clus_ai, x_lazy=self.x_lazy,
+                                                              alpha_teleport=self.alpha_teleport)
+                for enum_ts, target_terminal in enumerate(terminal_clus_ai):
+                    df_graph['terminal_clus' + str(cluster_labels_subi[target_terminal])] = 0.0000000
 
-                        pd_columnnames_terminal.append('terminal_clus' + str(cluster_labels_subi[target_terminal]))
+                    pd_columnnames_terminal.append('terminal_clus' + str(cluster_labels_subi[target_terminal]))
 
-                        for k, prob_ii in enumerate(prob_ai):
-                            df_graph.at[cluster_labels_subi[k], 'terminal_clus' + str(
-                                cluster_labels_subi[target_terminal])] = prob_ii
-                else:
-                    for enum_ts, target_terminal in enumerate(terminal_clus_ai):
-                        df_graph['terminal_clus' + str(cluster_labels_subi[target_terminal])] = 0.0000000
-
-                        pd_columnnames_terminal.append('terminal_clus' + str(cluster_labels_subi[target_terminal]))
-
-                        for k, prob_ii in enumerate(prob_lin_rw2[:, enum_ts]):
-                            df_graph.at[cluster_labels_subi[k], 'terminal_clus' + str(
-                                cluster_labels_subi[target_terminal])] = prob_ii
+                    for k, prob_ii in enumerate(prob_lin_rw2[:, enum_ts]):
+                        df_graph.at[cluster_labels_subi[k], 'terminal_clus' + str(
+                            cluster_labels_subi[target_terminal])] = prob_ii
             bp_array = df_graph[pd_columnnames_terminal].values
             bp_array[np.isnan(bp_array)] = 1e-8
 

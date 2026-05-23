@@ -106,7 +106,6 @@ from ._branch_streamplot import (
 from ._trajectory import (
     cell_fate,
     cellrank_macrostates,
-    lineage_probability,
     plot_stream,
     trajectory,
     trajectory_graph,
@@ -162,6 +161,14 @@ from ._flowsig import (
     curved_line as flowsig_curved_line,
     plot_curve_network as flowsig_plot_curve_network,
     plot_flowsig_network,
+)
+from ._grn import (
+    grn_activity,
+    grn_branch_networks,
+    grn_network,
+    grn_pando_panel,
+    grn_region_tracks,
+    grn_tf_targets,
 )
 from ._embedding import embedding_atlas
 from ._cnv import cnv_heatmap, cnv_summary, cnv_umap
@@ -277,7 +284,6 @@ __all__ = [
     "tapered_kde",
     "cell_fate",
     "cellrank_macrostates",
-    "lineage_probability",
     "plot_stream",
     "trajectory",
     "trajectory_graph",
@@ -360,6 +366,13 @@ __all__ = [
     "flowsig_curved_line",
     "flowsig_plot_curve_network",
     "plot_flowsig_network",
+    # @ _grn
+    "grn_activity",
+    "grn_branch_networks",
+    "grn_network",
+    "grn_pando_panel",
+    "grn_region_tracks",
+    "grn_tf_targets",
     # @ _embedding
     "embedding_atlas",
     # @ _density

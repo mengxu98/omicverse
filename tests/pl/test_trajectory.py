@@ -325,7 +325,7 @@ class _FakeStaVIABackend:
         )
 
 
-def test_plot_stream_accepts_fitted_stavia_wrapper():
+def test_plot_stream_rejects_native_stavia_wrapper():
     adata = _make_stavia_stream_adata()
     raw_model = _FakeStaVIABackend(adata)
 
@@ -339,68 +339,19 @@ def test_plot_stream_accepts_fitted_stavia_wrapper():
         def _effective_rw2_mode(self):
             return True
 
-    fig, ax = ov.pl.plot_stream(
-        FakeStaVIA(),
-        method="stavia",
-        density_grid=0.3,
-        n_neighbors_velocity_grid=2,
-        title=None,
-    )
-
-    assert fig is ax.figure
-    np.testing.assert_allclose(raw_model.calls[0]["embedding"], adata.obsm["X_umap"])
-    assert raw_model.calls[0]["smooth_transition"] == 1
-    assert raw_model.calls[0]["b"] == pytest.approx(20)
-    assert ax.collections
-    assert max(text.get_fontsize() for text in ax.texts) >= 8
-    assert ax.axison is False
-    plt.close(fig)
-
-
-def test_plot_stream_supports_stavia_anndata_with_backend_model():
-    adata = _make_stavia_stream_adata()
-    raw_model = _FakeStaVIABackend(adata)
-
-    fig, ax = ov.pl.plot_stream(
-        adata,
-        method="stavia",
-        model=raw_model,
-        key="traj_stavia",
-        density_grid=0.3,
-        n_neighbors_velocity_grid=2,
-        title=None,
-    )
-
-    assert raw_model.calls
-    assert fig is ax.figure
-    assert ax.collections
-    plt.close(fig)
-
-
-def test_plot_stream_respects_matplotlib_style_for_stavia():
-    adata = _make_stavia_stream_adata()
-    raw_model = _FakeStaVIABackend(adata)
-
-    with plt.rc_context({"axes.titlesize": 17}):
-        fig, ax = ov.pl.plot_stream(
-            adata,
+    with pytest.raises(ValueError, match="no longer wraps native StaVIA/VIA"):
+        ov.pl.plot_stream(
+            FakeStaVIA(),
             method="stavia",
-            model=raw_model,
-            key="traj_stavia",
             density_grid=0.3,
             n_neighbors_velocity_grid=2,
-            title="Styled stream",
         )
 
-    assert ax.title.get_text() == "Styled stream"
-    assert ax.title.get_fontsize() == pytest.approx(17)
-    plt.close(fig)
 
-
-def test_plot_stream_requires_stavia_backend_model_for_anndata():
+def test_plot_stream_rejects_stavia_anndata_summary():
     adata = _make_stavia_stream_adata()
 
-    with pytest.raises(ValueError, match="backend model"):
+    with pytest.raises(ValueError, match="no longer wraps native StaVIA/VIA"):
         ov.pl.plot_stream(adata, method="stavia", key="traj_stavia")
 
 
@@ -432,54 +383,26 @@ def test_plot_stream_supports_generic_pseudotime_results():
     plt.close(fig)
 
 
-def test_stavia_native_plots_render_in_ov_pl():
+def test_stavia_native_plots_are_not_wrapped_in_ov_pl():
     adata = _make_stavia_stream_adata()
     raw_model = _FakeStaVIABackend(adata)
 
-    fig, ax, ax1 = ov.pl.trajectory_graph(
-        adata,
-        method="stavia",
-        model=raw_model,
-        key="traj_stavia",
-        figsize=(6, 3),
-        title="Native graph",
-    )
-    assert tuple(fig.get_size_inches()) == pytest.approx((6, 3))
-    assert ax.get_title() == "Native graph"
-    assert ax1.collections
-    plt.close(fig)
+    with pytest.raises(ValueError, match="no longer wraps native StaVIA/VIA"):
+        ov.pl.trajectory_graph(
+            adata,
+            method="stavia",
+            model=raw_model,
+            key="traj_stavia",
+        )
+    with pytest.raises(ValueError, match="no longer wraps native StaVIA/VIA"):
+        ov.pl.trajectory_projection(
+            adata,
+            method="stavia",
+            model=raw_model,
+            key="traj_stavia",
+        )
 
-    fig, ax, ax1 = ov.pl.trajectory_projection(
-        adata,
-        method="stavia",
-        model=raw_model,
-        key="traj_stavia",
-        figsize=(6, 3),
-    )
-    assert tuple(fig.get_size_inches()) == pytest.approx((6, 3))
-    assert ax.collections
-    assert ax.get_legend() is None
-    assert ax1.collections
-    assert ax1.patches
-    terminal_texts = [
-        text for text in ax1.texts if text.get_text().startswith("TS")
-    ]
-    assert terminal_texts
-    assert mcolors.same_color(terminal_texts[0].get_color(), "white")
-    assert terminal_texts[0].get_path_effects()
-    plt.close(fig)
-
-    fig, axs = ov.pl.lineage_probability(
-        adata,
-        method="stavia",
-        model=raw_model,
-        key="traj_stavia",
-        figsize=(4, 4),
-    )
-    assert tuple(fig.get_size_inches()) == pytest.approx((4, 4))
-    assert axs.flat[0].collections
-    plt.close(fig)
-
+    assert not hasattr(ov.pl, "lineage_probability")
     assert not hasattr(ov.pl, "plot_graph")
     assert not hasattr(ov.pl, "plot_trajectory")
     assert not hasattr(ov.pl, "plot_lineage_probability")
@@ -537,33 +460,6 @@ def test_trajectory_tree_supports_stavia_backend_model():
         cell_collection.get_offsets()[:, 1],
         adata.obs["traj_stavia_pseudotime"].to_numpy(dtype=float),
     )
-    plt.close(fig)
-
-
-def test_lineage_probability_uses_adaptive_layout_for_two_lineages():
-    adata = _make_stavia_stream_adata()
-    raw_model = _FakeStaVIABackend(adata)
-    raw_model.single_cell_bp = np.array(
-        [
-            [0.90, 0.10],
-            [0.85, 0.15],
-            [0.20, 0.80],
-            [0.10, 0.90],
-        ],
-        dtype=float,
-    )
-    raw_model.terminal_clusters = [0, 1]
-
-    fig, axs = ov.pl.lineage_probability(
-        adata,
-        method="stavia",
-        model=raw_model,
-        key="traj_stavia",
-    )
-
-    assert axs.shape == (2, 1)
-    width, height = fig.get_size_inches()
-    assert height > width
     plt.close(fig)
 
 

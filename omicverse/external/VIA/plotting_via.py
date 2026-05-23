@@ -291,17 +291,9 @@ def make_edgebundle_milestone(embedding: ndarray = None, sc_graph=None, via_obje
     else:
         edges['weight'] = 1
     print(f'{datetime.now()}\tMaking smooth edges')
-    try:
-        from datashader.bundling import hammer_bundle
-    except ImportError:
-        print(
-            f"{datetime.now()}\tdatashader is not installed. "
-            "Using straight milestone graph edges instead of hammer-bundled edges."
-        )
-        hb = straight_edge_bundle(nodes_mean, edges)
-    else:
-        hb = hammer_bundle(nodes_mean, edges, weight='weight', initial_bandwidth=initial_bandwidth,
-                           decay=decay)  # default bw=0.05, dec=0.7
+    from datashader.bundling import hammer_bundle
+    hb = hammer_bundle(nodes_mean, edges, weight='weight', initial_bandwidth=initial_bandwidth,
+                       decay=decay)  # default bw=0.05, dec=0.7
     # hb.x and hb.y contain all the x and y coords of the points that make up the edge lines.
     # each new line segment is separated by a nan value
     # https://datashader.org/_modules/datashader/bundling.html#hammer_bundle
@@ -2851,7 +2843,9 @@ def via_streamplot(via_object, embedding: ndarray = None, density_grid: float = 
 
 def get_gene_expression(via_object, gene_exp: pd.DataFrame, cmap: str = 'jet', dpi: int = 150, marker_genes: list = [],
                         linewidth: float = 2.0, n_splines: int = 10, spline_order: int = 4, fontsize_: int = 8, 
-                        marker_lineages=[], optional_title_text: str = '', cmap_dict: dict = None, conf_int:float=0.95, driver_genes:bool=False, driver_lineage:int=None):
+                        marker_lineages=[], optional_title_text: str = '', cmap_dict: dict = None, conf_int:float=0.95, driver_genes:bool=False, driver_lineage:int=None,
+                        figsize=None, ncols: int = 4, show_legend: bool = True, legend_loc: str = 'right',
+                        legend_fontsize: int = None):
     '''
     :param via_object: via object
     :param gene_exp: dataframe where columns are features (gene) and rows are single cells
@@ -2866,6 +2860,11 @@ def get_gene_expression(via_object, gene_exp: pd.DataFrame, cmap: str = 'jet', d
     :param conf_int: Confidence interval of gene expressions. Also used for identifying driver genes if driver_genes = True.
     :param driver_genes: Set True to compute and plot top 3 upregulated & downregulated driver genes expressions given terminal cell fates.
     :param driver_lineage: Provide lineage used to compute driver genes if driver_genes=True.
+    :param figsize: Optional matplotlib figure size.
+    :param ncols: Number of subplot columns.
+    :param show_legend: Whether to draw one shared figure legend.
+    :param legend_loc: Shared legend location. Use 'right' or any matplotlib legend location string.
+    :param legend_fontsize: Shared legend fontsize. Defaults to fontsize_.
     :return: fig, axs
     '''
     import pygam as pg
@@ -2896,12 +2895,12 @@ def get_gene_expression(via_object, gene_exp: pd.DataFrame, cmap: str = 'jet', d
         cmap_ = cmap_dict
     n_genes = gene_exp.shape[1]
 
-    fig_nrows, mod = divmod(n_genes, 4)
+    fig_ncols = max(1, min(int(ncols), max(n_genes, 1)))
+    fig_nrows, mod = divmod(n_genes, fig_ncols)
     if mod == 0: fig_nrows = fig_nrows
     if mod != 0: fig_nrows += 1
 
-    fig_ncols = 4
-    fig, axs = plt.subplots(fig_nrows, fig_ncols, dpi=dpi)
+    fig, axs = plt.subplots(fig_nrows, fig_ncols, dpi=dpi, figsize=figsize)
     fig.patch.set_visible(False)
     i_gene = 0  # counter for number of genes
     i_terminal = 0  # counter for terminal cluster
@@ -2970,10 +2969,6 @@ def get_gene_expression(via_object, gene_exp: pd.DataFrame, cmap: str = 'jet', d
                             # Set tick font size
                             for label in (axs[r, c].get_xticklabels() + axs[r, c].get_yticklabels()):
                                 label.set_fontsize(fontsize_ - 1)
-                            if i_gene == n_genes - 1:
-                                axs[r, c].legend(frameon=False, fontsize=fontsize_)
-                                axs[r, c].set_xlabel('Time', fontsize=fontsize_)
-                                axs[r, c].set_ylabel('Intensity', fontsize=fontsize_)
                             axs[r, c].spines['top'].set_visible(False)
                             axs[r, c].spines['right'].set_visible(False)
                             axs[r, c].grid(False)
@@ -2985,10 +2980,6 @@ def get_gene_expression(via_object, gene_exp: pd.DataFrame, cmap: str = 'jet', d
                             # Set tick font size
                             for label in (axs[c].get_xticklabels() + axs[c].get_yticklabels()):
                                 label.set_fontsize(fontsize_ - 1)
-                            if i_gene == n_genes - 1:
-                                axs[c].legend(frameon=False, fontsize=fontsize_)
-                                axs[c].set_xlabel('Time', fontsize=fontsize_)
-                                axs[c].set_ylabel('Intensity', fontsize=fontsize_)
                             axs[c].spines['top'].set_visible(False)
                             axs[c].spines['right'].set_visible(False)
                             axs[c].grid(False)
@@ -3000,6 +2991,43 @@ def get_gene_expression(via_object, gene_exp: pd.DataFrame, cmap: str = 'jet', d
                 else:
                     axs[c].axis('off')
                     axs[c].grid(False)
+    axes = np.ravel(axs)
+    handles = []
+    labels = []
+    for ax in axes[:n_genes]:
+        ax_handles, ax_labels = ax.get_legend_handles_labels()
+        for handle, label in zip(ax_handles, ax_labels):
+            if label not in labels:
+                handles.append(handle)
+                labels.append(label)
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+
+    legend_fontsize = fontsize_ if legend_fontsize is None else legend_fontsize
+    right_margin = 0.96
+    if show_legend and len(handles) > 0:
+        if legend_loc in {'right', 'right margin'}:
+            right_margin = 0.82
+            fig.legend(handles, labels, loc='center left', bbox_to_anchor=(0.84, 0.5),
+                       frameon=False, fontsize=legend_fontsize)
+        else:
+            fig.legend(handles, labels, loc=legend_loc, frameon=False, fontsize=legend_fontsize)
+
+    try:
+        fig.tight_layout(rect=[0.05, 0.06, right_margin, 0.95])
+    except Exception:
+        fig.subplots_adjust(left=0.08, right=right_margin, bottom=0.12, top=0.9, wspace=0.3, hspace=0.45)
+    visible_axes = [ax for ax in axes[:n_genes] if ax.axison]
+    if len(visible_axes) > 0:
+        positions = [ax.get_position() for ax in visible_axes]
+        left = min(pos.x0 for pos in positions)
+        right = max(pos.x1 for pos in positions)
+        bottom = min(pos.y0 for pos in positions)
+        top = max(pos.y1 for pos in positions)
+        fig.text((left + right) / 2, max(0.02, bottom - 0.055), 'Time',
+                 ha='center', va='top', fontsize=fontsize_)
+        fig.text(max(0.01, left - 0.055), (bottom + top) / 2, 'Intensity',
+                 ha='right', va='center', rotation='vertical', fontsize=fontsize_)
     return fig, axs
 
 

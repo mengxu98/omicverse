@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 from typing import Any, Iterable
 
@@ -13,7 +14,7 @@ from .._settings import add_reference
 
 
 def _stavia_required_modules(*, rw2: bool = False) -> tuple[str, ...]:
-    dependencies = ("leidenalg",)
+    dependencies = ("leidenalg", "hnswlib", "pygam")
     if rw2:
         dependencies += ("pecanpy", "numba_progress")
     return dependencies
@@ -32,7 +33,11 @@ def _raise_stavia_dependency_error(
             "RW2 mode requires optional packages. "
             "Install them with `pip install pecanpy numba-progress`."
             if rw2
-            else "Install OmicVerse with its core dependencies."
+            else (
+                "StaVIA uses the vendored VIA backend. Install the VIA runtime "
+                "dependencies with `pip install leidenalg hnswlib pygam` or "
+                "`pip install \"omicverse[full]\"`."
+            )
         ),
     )
     if cause is not None:
@@ -81,6 +86,26 @@ def _as_list(value: Any) -> list[Any] | None:
     if isinstance(value, (int, np.integer)):
         return [int(value)]
     return list(value)
+
+
+@contextlib.contextmanager
+def _suppress_via_plots():
+    """Prevent backend auto-display while preserving VIA console output."""
+    import matplotlib.pyplot as plt
+
+    existing_figures = set(plt.get_fignums())
+    original_show = plt.show
+
+    def _no_show(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    plt.show = _no_show
+    try:
+        yield
+    finally:
+        for figure_number in set(plt.get_fignums()) - existing_figures:
+            plt.close(figure_number)
+        plt.show = original_show
 
 
 @register_function(
@@ -271,6 +296,7 @@ class StaVIA:
             "spatial_knn": self.spatial_knn,
             "spatial_aux": self._spatial_aux(),
             "RW2_mode": self._effective_rw2_mode(),
+            "do_compute_embedding": False,
         }
         if root_user is not None:
             params["root_user"] = root_user
@@ -283,8 +309,9 @@ class StaVIA:
             self.via_kwargs.update(backend_overrides)
         params = self._backend_params()
         VIA = _load_via_backend(rw2_mode=bool(params.get("RW2_mode")))
-        self.model = VIA.core.VIA(**params)
-        self.model.run_VIA()
+        with _suppress_via_plots():
+            self.model = VIA.core.VIA(**params)
+            self.model.run_VIA()
         self._write_results(params)
         add_reference(self.adata, "StaVIA", "spatial-temporal trajectory inference with StaVIA")
         return self

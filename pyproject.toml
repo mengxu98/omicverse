@@ -54,7 +54,7 @@ dependencies = [
     
     #'gdown>=4.6',
     'igraph>=0.10',
-    'leidenalg>=0.9',
+    #'leidenalg>=0.9',
     
     
     #'phate>=1.0',
@@ -120,6 +120,7 @@ full = [
   'boltons>=23.0',
   'cytoolz>=0.12',
   'frozendict>=2.3',
+  'leidenalg>=0.9',
   'gdown>=4.6',
   'wandb',
   'pygam>=0.8.0',

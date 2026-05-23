@@ -41,7 +41,7 @@ from ._single import embedding
         "ov.pl.cell_fate(estimator, which='terminal', basis='umap')",
         "ov.pl.cell_fate(velo_obj, which='terminal', basis='umap')",
     ],
-    related=["single.Velo.cellrank_fate", "pl.trajectory", "pl.lineage_probability"],
+    related=["single.Velo.cellrank_fate", "pl.trajectory"],
 )
 def cell_fate(
     estimator,
@@ -1047,206 +1047,6 @@ def _draw_stavia_categorical_points(
         )
 
 
-def _plot_stavia_stream(
-    stavia_or_adata,
-    *,
-    model=None,
-    basis=None,
-    cluster_key=None,
-    key="stavia",
-    x=0,
-    y=1,
-    density_grid=0.5,
-    arrow_size=0.7,
-    arrow_color="k",
-    color_dict=None,
-    arrow_style="-|>",
-    max_length=4,
-    linewidth=1,
-    min_mass=1,
-    cutoff_perc=5,
-    scatter_size=500,
-    scatter_alpha=0.5,
-    marker_edgewidth=0.1,
-    density_stream=2,
-    smooth_transition=1,
-    smooth_grid=0.5,
-    color_scheme="annotation",
-    add_outline_clusters=False,
-    cluster_outline_edgewidth=0.001,
-    gp_color="white",
-    bg_color="black",
-    dpi=None,
-    title="Streamplot",
-    b_bias=20,
-    n_neighbors_velocity_grid=None,
-    labels=None,
-    use_sequentially_augmented=False,
-    cmap="rainbow",
-    show_text_labels=True,
-    text_fontsize=8,
-    show_legend=False,
-    figsize=None,
-    frameon=None,
-    ax=None,
-    show=None,
-    save=None,
-):
-    """Plot StaVIA/VIA streamlines with OV-level figure control."""
-    from ._animation_lines import compute_velocity_on_grid
-
-    adata, raw_model, basis, cluster_key, _ = _resolve_stavia_inputs(
-        stavia_or_adata,
-        model=model,
-        basis=basis,
-        cluster_key=cluster_key,
-        key=key,
-    )
-    embedding_coords = np.asarray(adata.obsm[basis])[:, [x, y]]
-
-    velocity = raw_model._velocity_embedding(
-        embedding_coords,
-        smooth_transition,
-        b=b_bias,
-        use_sequentially_augmented=use_sequentially_augmented,
-    )
-    velocity = np.asarray(velocity, dtype=float) * 20
-
-    grid_neighbors = n_neighbors_velocity_grid
-    if grid_neighbors is None:
-        grid_neighbors = max(2, min(int(adata.n_obs / 50), 20))
-    grid_neighbors = max(1, min(int(grid_neighbors), adata.n_obs))
-    X_grid, V_grid = compute_velocity_on_grid(
-        X_emb=embedding_coords,
-        V_emb=velocity,
-        density=density_grid,
-        smooth=smooth_grid,
-        min_mass=min_mass,
-        autoscale=False,
-        adjust_for_stream=True,
-        cutoff_perc=cutoff_perc,
-        n_neighbors=grid_neighbors,
-    )
-
-    lengths = np.sqrt((V_grid ** 2).sum(0))
-    stream_linewidth = 1 if linewidth is None else linewidth
-    finite_lengths = lengths[np.isfinite(lengths)]
-    if finite_lengths.size > 0 and np.nanmax(finite_lengths) > 0:
-        stream_linewidth = stream_linewidth * 2 * lengths / np.nanmax(finite_lengths)
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    else:
-        fig = ax.figure
-    ax.grid(False)
-    ax.streamplot(
-        X_grid[0],
-        X_grid[1],
-        V_grid[0],
-        V_grid[1],
-        color=arrow_color,
-        arrowsize=arrow_size,
-        arrowstyle=arrow_style,
-        zorder=3,
-        linewidth=stream_linewidth,
-        density=density_stream,
-        maxlength=max_length,
-    )
-
-    if add_outline_clusters:
-        gp_size = (2 * (scatter_size * cluster_outline_edgewidth * 0.1) + 0.1 * scatter_size) ** 2
-        bg_size = (2 * (scatter_size * cluster_outline_edgewidth) + np.sqrt(gp_size)) ** 2
-        ax.scatter(embedding_coords[:, 0], embedding_coords[:, 1], s=bg_size, marker=".", c=bg_color, zorder=-2)
-        ax.scatter(embedding_coords[:, 0], embedding_coords[:, 1], s=gp_size, marker=".", c=gp_color, zorder=-1)
-
-    if labels is None:
-        if color_scheme == "time":
-            ax.scatter(
-                embedding_coords[:, 0],
-                embedding_coords[:, 1],
-                c=raw_model.single_cell_pt_markov,
-                alpha=scatter_alpha,
-                zorder=0,
-                s=scatter_size,
-                linewidths=marker_edgewidth,
-                cmap="viridis_r",
-            )
-        elif color_scheme == "annotation":
-            _draw_stavia_categorical_points(
-                ax,
-                embedding_coords,
-                adata.obs[cluster_key],
-                adata=adata,
-                color_key=cluster_key,
-                color_dict=color_dict,
-                cmap=cmap,
-                scatter_size=scatter_size,
-                scatter_alpha=scatter_alpha,
-                marker_edgewidth=marker_edgewidth,
-                show_text_labels=show_text_labels,
-                text_fontsize=text_fontsize,
-                show_legend=show_legend,
-            )
-        elif color_scheme == "cluster":
-            _draw_stavia_categorical_points(
-                ax,
-                embedding_coords,
-                getattr(raw_model, "labels"),
-                color_dict=color_dict,
-                cmap=cmap,
-                scatter_size=scatter_size,
-                scatter_alpha=scatter_alpha,
-                marker_edgewidth=marker_edgewidth,
-                show_text_labels=show_text_labels,
-                text_fontsize=text_fontsize,
-                show_legend=show_legend,
-            )
-        else:
-            raise ValueError("`color_scheme` must be 'annotation', 'cluster', or 'time' when `labels` is not provided.")
-    else:
-        labels = np.asarray(labels)
-        if labels.dtype.kind in {"U", "S", "O", "b"}:
-            _draw_stavia_categorical_points(
-                ax,
-                embedding_coords,
-                labels,
-                color_dict=color_dict,
-                cmap=cmap,
-                scatter_size=scatter_size,
-                scatter_alpha=scatter_alpha,
-                marker_edgewidth=marker_edgewidth,
-                show_text_labels=show_text_labels,
-                text_fontsize=text_fontsize,
-                show_legend=show_legend,
-            )
-        else:
-            ax.scatter(
-                embedding_coords[:, 0],
-                embedding_coords[:, 1],
-                c=labels,
-                alpha=scatter_alpha,
-                zorder=0,
-                s=scatter_size,
-                linewidths=marker_edgewidth,
-                cmap=cmap,
-            )
-
-    if frameon in {False, "none", "off", None}:
-        ax.axis("off")
-    elif frameon == "small":
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-    if title is not None:
-        ax.set_title(title)
-    if save:
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-    if show:
-        plt.show()
-    return fig, ax
-
-
 def _weighted_pseudotime_direction(coords, pseudotime, i, neigh, weights, *, b_bias):
     if len(neigh) == 0:
         return np.zeros(2, dtype=float)
@@ -1341,16 +1141,14 @@ def _pseudotime_velocity_on_embedding(
     ],
     category="pl",
     description=(
-        "Plot trajectory streamlines from StaVIA/VIA models, generic "
-        "pseudotime results, or embedding-level velocity vectors."
+        "Plot trajectory streamlines from generic pseudotime results or "
+        "embedding-level velocity vectors."
     ),
     examples=[
-        "ov.pl.plot_stream(stavia, method='stavia', density_grid=0.8)",
         "ov.pl.plot_stream(adata, method='pseudotime', pseudotime_key='palantir_pseudotime')",
         "ov.pl.plot_stream(adata, method='velocity', velocity_key='velocity_S')",
     ],
     related=[
-        "single.StaVIA",
         "pl.trajectory",
         "pl.branch_streamplot",
         "pl.add_streamplot",
@@ -1395,7 +1193,6 @@ def plot_stream(
 ):
     """Plot streamlines through a method-aware OV interface.
 
-    ``method='stavia'`` uses the fitted StaVIA/VIA backend transition matrix.
     ``method='pseudotime'`` builds a local pseudotime-directed vector field
     from any numeric ``adata.obs[pseudotime_key]`` result. ``method='velocity'``
     overlays an existing embedding-level velocity field from ``adata.obsm``.
@@ -1404,49 +1201,21 @@ def plot_stream(
     if method == "auto":
         summary = getattr(data, "uns", {}).get(key, {})
         if _is_fitted_trajectory_wrapper(data) or _is_fitted_trajectory_wrapper(model) or model is not None:
-            method = "stavia"
+            _raise_native_via_plot_message("plot_stream")
         elif pseudotime_key is not None:
             method = "pseudotime"
         elif hasattr(data, "obsm") and velocity_key in data.obsm:
             method = "velocity"
         elif summary.get("method") == "StaVIA":
-            method = "stavia"
+            _raise_native_via_plot_message("plot_stream")
         else:
             raise ValueError(
-                "Could not infer streamplot method. Pass `method='stavia'`, "
-                "`method='pseudotime'`, or `method='velocity'`."
+                "Could not infer streamplot method. Pass "
+                "`method='pseudotime'` or `method='velocity'."
             )
 
     if method in {"stavia", "via"}:
-        stavia_kwargs = dict(kwargs)
-        stavia_kwargs.setdefault("density_grid", density_grid)
-        stavia_kwargs.setdefault("smooth_grid", smooth_grid)
-        stavia_kwargs.setdefault("min_mass", min_mass)
-        stavia_kwargs.setdefault("cutoff_perc", cutoff_perc)
-        stavia_kwargs.setdefault("arrow_color", arrow_color)
-        stavia_kwargs.setdefault("arrow_size", arrow_size)
-        stavia_kwargs.setdefault("arrow_style", arrow_style)
-        stavia_kwargs.setdefault("density_stream", density_stream)
-        stavia_kwargs.setdefault("linewidth", linewidth)
-        stavia_kwargs.setdefault("max_length", max_length)
-        stavia_kwargs.setdefault("scatter_size", scatter_size)
-        stavia_kwargs.setdefault("scatter_alpha", scatter_alpha)
-        stavia_kwargs.setdefault("dpi", dpi)
-        stavia_kwargs.setdefault("figsize", figsize)
-        stavia_kwargs.setdefault("frameon", frameon)
-        stavia_kwargs.setdefault("ax", ax)
-        stavia_kwargs.setdefault("show", show)
-        stavia_kwargs.setdefault("save", save)
-        return _plot_stavia_stream(
-            data,
-            model=model,
-            basis=basis,
-            cluster_key=cluster_key,
-            key=key,
-            x=x,
-            y=y,
-            **stavia_kwargs,
-        )
+        _raise_native_via_plot_message("plot_stream")
 
     if method == "pseudotime":
         from ._animation_lines import compute_velocity_on_grid
@@ -1580,8 +1349,8 @@ def plot_stream(
         return fig, ax
 
     raise NotImplementedError(
-        "`ov.pl.plot_stream` currently supports method='stavia', "
-        "method='pseudotime', and method='velocity'."
+        "`ov.pl.plot_stream` currently supports method='pseudotime' and "
+        "method='velocity'."
     )
 
 
@@ -1591,6 +1360,14 @@ def _as_cluster_key(value):
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return value
+
+
+def _raise_native_via_plot_message(plot_name):
+    raise ValueError(
+        f"`ov.pl.{plot_name}` no longer wraps native StaVIA/VIA plotting. "
+        "Use the fitted VIA object directly, for example `v0 = stavia.model`, "
+        "then call `VIA.core.*` or the corresponding `v0.plot_*` method."
+    )
 
 
 def _cluster_sort_key(value):
@@ -2124,304 +1901,6 @@ def _resolve_stavia_pseudotime(data, adata, raw_model, *, key, pseudotime):
     return values, "StaVIA pseudotime"
 
 
-def _plot_stavia_graph(
-    data,
-    *,
-    model=None,
-    cluster_key=None,
-    basis=None,
-    key="stavia",
-    x=0,
-    y=1,
-    type_data="pt",
-    gene_exp=None,
-    cmap_piechart="rainbow",
-    title="",
-    cmap=None,
-    ax_text=True,
-    dpi=150,
-    headwidth_arrow=0.1,
-    alpha_edge=0.4,
-    linewidth_edge=2,
-    edge_color="darkblue",
-    reference_labels=None,
-    show_legend=True,
-    pie_size_scale=0.8,
-    fontsize=8,
-    pt_visual_threshold=99,
-    highlight_terminal_clusters=True,
-    size_node_notpiechart=1,
-    figsize=(10, 5),
-    frameon=None,
-    ax=None,
-    ax1=None,
-    show=None,
-    save=None,
-    **_,
-):
-    context = _stavia_plot_context(
-        data,
-        model=model,
-        basis=basis,
-        cluster_key=cluster_key,
-        key=key,
-        x=x,
-        y=y,
-    )
-    adata = context["adata"]
-    raw_model = context["raw_model"]
-    cluster_key = context["cluster_key"]
-    embedding_coords = context["embedding_coords"]
-    labels = context["labels"]
-    edges = context["edges"]
-    terminals = context["terminals"]
-    clusters = context["clusters"]
-    populations = context["populations"]
-    value_map, value_label = _stavia_cluster_values(
-        raw_model,
-        labels,
-        clusters,
-        type_data=type_data,
-        gene_exp=gene_exp,
-        pt_visual_threshold=pt_visual_threshold,
-    )
-    node_pos = _stavia_node_positions(raw_model, labels, embedding_coords, clusters)
-    reference = _stavia_reference_labels(
-        adata,
-        raw_model,
-        labels,
-        cluster_key=cluster_key,
-        reference_labels=reference_labels,
-    )
-    categories, composition = _stavia_composition(labels, reference, clusters)
-    color_map = _stavia_category_color_map(
-        adata,
-        cluster_key,
-        pd.Series(reference),
-        cmap=cmap_piechart,
-    )
-    cmap = cmap or ("coolwarm" if type_data == "gene" else "viridis_r")
-
-    if ax is None and ax1 is None:
-        fig, (ax, ax1) = plt.subplots(1, 2, sharey=True, figsize=figsize, dpi=dpi)
-    elif ax is not None and ax1 is not None:
-        fig = ax.figure
-    else:
-        raise ValueError("Pass both `ax` and `ax1`, or neither.")
-
-    for graph_ax in (ax, ax1):
-        _draw_stavia_graph_edges(
-            graph_ax,
-            node_pos,
-            edges,
-            value_map=value_map,
-            edge_color=edge_color,
-            linewidth_edge=linewidth_edge,
-            alpha_edge=alpha_edge,
-            headwidth_arrow=headwidth_arrow,
-        )
-        _stavia_graph_limits(graph_ax, node_pos)
-
-    handles = _draw_stavia_pie_nodes(
-        fig,
-        ax,
-        node_pos,
-        clusters,
-        categories,
-        composition,
-        color_map,
-        populations,
-        pie_size_scale=pie_size_scale,
-        ax_text=ax_text,
-        fontsize=fontsize,
-        highlight_terminal_clusters=highlight_terminal_clusters,
-        terminal_clusters=terminals,
-    )
-    scatter = _draw_stavia_value_nodes(
-        fig,
-        ax1,
-        node_pos,
-        clusters,
-        populations,
-        value_map,
-        cmap=cmap,
-        size_node_notpiechart=size_node_notpiechart,
-        highlight_terminal_clusters=highlight_terminal_clusters,
-        terminal_clusters=terminals,
-    )
-
-    if show_legend and handles:
-        ax.legend(handles=handles, loc="best", fontsize=fontsize, frameon=False)
-    fig.colorbar(scatter, ax=ax1, fraction=0.046, pad=0.04, label=value_label.lower())
-    ax.set_title(title or "Cluster composition")
-    ax1.set_title((value_label + (" " + title if title else "")).strip())
-    _format_stavia_axis(ax, frameon=frameon)
-    _format_stavia_axis(ax1, frameon=frameon)
-    fig.tight_layout()
-    if save:
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-    if show:
-        plt.show()
-    return fig, ax, ax1
-
-
-def _plot_stavia_trajectory(
-    data,
-    *,
-    model=None,
-    basis=None,
-    cluster_key=None,
-    key="stavia",
-    x=0,
-    y=1,
-    title_str="Pseudotime",
-    draw_all_curves=True,
-    arrow_width_scale_factor=15.0,
-    scatter_size=50,
-    scatter_alpha=0.5,
-    linewidth=1.5,
-    marker_edgewidth=1,
-    cmap_pseudotime="viridis_r",
-    dpi=150,
-    highlight_terminal_states=True,
-    use_maxout_edgelist=False,
-    figsize=(10, 5),
-    frameon=None,
-    show_legend=False,
-    legend_loc="right margin",
-    legend_fontsize=None,
-    text_fontsize=8,
-    terminal_label_color="white",
-    terminal_label_outline="#303030",
-    terminal_label_outline_width=2.0,
-    curve_color="#323538",
-    ax=None,
-    ax1=None,
-    show=None,
-    save=None,
-    **_,
-):
-    context = _stavia_plot_context(
-        data,
-        model=model,
-        basis=basis,
-        cluster_key=cluster_key,
-        key=key,
-        x=x,
-        y=y,
-        use_maxout_edgelist=use_maxout_edgelist,
-    )
-    adata = context["adata"]
-    raw_model = context["raw_model"]
-    cluster_key = context["cluster_key"]
-    embedding_coords = context["embedding_coords"]
-    labels = context["labels"]
-    edges = context["edges"]
-    terminals = context["terminals"]
-    roots = context["roots"]
-    value_map = context["value_map"]
-    centers = context["centers"]
-    reference = _stavia_reference_labels(adata, raw_model, labels, cluster_key=cluster_key)
-    pt = np.asarray(getattr(raw_model, "single_cell_pt_markov", []), dtype=float)
-    if pt.size != adata.n_obs:
-        pt = np.asarray([value_map.get(label, np.nan) for label in labels], dtype=float)
-    edges_to_draw = edges if draw_all_curves else _shortest_path_edges(edges, roots, terminals)
-    if not edges_to_draw:
-        edges_to_draw = edges
-
-    if ax is None and ax1 is None:
-        fig, (ax, ax1) = plt.subplots(1, 2, sharey=True, figsize=figsize, dpi=dpi)
-    elif ax is not None and ax1 is not None:
-        fig = ax.figure
-    else:
-        raise ValueError("Pass both `ax` and `ax1`, or neither.")
-
-    _draw_stavia_categorical_points(
-        ax,
-        embedding_coords,
-        reference,
-        adata=adata,
-        color_key=cluster_key if cluster_key in adata.obs else None,
-        scatter_size=scatter_size,
-        scatter_alpha=scatter_alpha,
-        marker_edgewidth=marker_edgewidth * 0.1,
-        show_text_labels=False,
-        show_legend=show_legend,
-        legend_loc=legend_loc,
-        legend_fontsize=legend_fontsize,
-    )
-    ax.set_title(
-        "True labels: ncomps:"
-        + str(getattr(raw_model, "ncomp", ""))
-        + ". knn:"
-        + str(getattr(raw_model, "knn", ""))
-    )
-
-    scatter = ax1.scatter(
-        embedding_coords[:, 0],
-        embedding_coords[:, 1],
-        c=pt,
-        cmap=cmap_pseudotime,
-        alpha=scatter_alpha,
-        s=scatter_size,
-        linewidths=marker_edgewidth * 0.1,
-        zorder=2,
-    )
-    fig.colorbar(scatter, ax=ax1, fraction=0.046, pad=0.04, label="pseudotime")
-    _draw_stavia_embedding_edges(
-        ax1,
-        centers,
-        edges_to_draw,
-        value_map=value_map,
-        color=curve_color,
-        linewidth=linewidth,
-        arrow_size=max(8, float(arrow_width_scale_factor)),
-    )
-    for terminal in terminals:
-        if terminal not in centers:
-            continue
-        center = centers[terminal]
-        ax1.scatter(
-            center[0],
-            center[1],
-            c="black",
-            s=60,
-            edgecolors="yellow" if highlight_terminal_states else "none",
-            linewidths=2 if highlight_terminal_states else 0,
-            zorder=5,
-        )
-        if highlight_terminal_states:
-            path_effects = []
-            if terminal_label_outline_width:
-                path_effects = [
-                    pe.withStroke(
-                        linewidth=terminal_label_outline_width,
-                        foreground=terminal_label_outline,
-                    )
-                ]
-            ax1.annotate(
-                f"TS{terminal}",
-                xy=center,
-                xytext=(3, 3),
-                textcoords="offset points",
-                fontsize=text_fontsize,
-                color=terminal_label_color,
-                fontweight="bold",
-                path_effects=path_effects,
-                zorder=6,
-            )
-    ax1.set_title(title_str)
-    for plot_ax in (ax, ax1):
-        _add_axis_padding(plot_ax, embedding_coords[:, 0], embedding_coords[:, 1], frac=0.04)
-        _format_stavia_axis(plot_ax, frameon=frameon)
-    fig.tight_layout()
-    if save:
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-    if show:
-        plt.show()
-    return fig, ax, ax1
-
-
 def _plot_stavia_trajectory_single(
     data,
     *,
@@ -2529,163 +2008,12 @@ def _plot_stavia_trajectory_single(
     return fig, ax
 
 
-def _lineage_probability_matrix(adata, raw_model, *, key="stavia"):
-    probabilities = getattr(raw_model, "single_cell_bp", None)
-    if probabilities is None:
-        summary = getattr(adata, "uns", {}).get(key, {})
-        obsm_key = summary.get("lineage_probability_key")
-        if obsm_key is not None and obsm_key in adata.obsm:
-            probabilities = adata.obsm[obsm_key]
-    if probabilities is None:
-        raise ValueError("StaVIA lineage probabilities were not found.")
-
-    if isinstance(probabilities, pd.DataFrame):
-        columns = list(probabilities.columns)
-        probabilities = probabilities.to_numpy(dtype=float)
-    else:
-        columns = None
-        probabilities = np.asarray(probabilities, dtype=float)
-    if probabilities.ndim != 2:
-        raise ValueError("StaVIA lineage probabilities must be a two-dimensional matrix.")
-    if probabilities.shape[0] != adata.n_obs and probabilities.shape[1] == adata.n_obs:
-        probabilities = probabilities.T
-    if probabilities.shape[0] != adata.n_obs:
-        raise ValueError(
-            "StaVIA lineage probabilities have incompatible shape "
-            f"{probabilities.shape}; expected {adata.n_obs} rows."
-        )
-    probabilities = np.nan_to_num(probabilities, nan=0.0, posinf=0.0, neginf=0.0)
-    row_sums = probabilities.sum(axis=1)
-    valid = row_sums > 0
-    probabilities[valid] = probabilities[valid] / row_sums[valid, None]
-    return probabilities, columns
-
-
-def _lineage_column_indices(raw_model, probabilities, columns, marker_lineages):
-    terminal_clusters = list(getattr(raw_model, "terminal_clusters", []))
-    terminal_clusters = [_as_cluster_key(value) for value in terminal_clusters]
-    if not terminal_clusters:
-        terminal_clusters = list(range(probabilities.shape[1]))
-    if marker_lineages is None or len(marker_lineages) == 0:
-        marker_lineages = terminal_clusters
-    selected = []
-    for marker in marker_lineages:
-        marker_key = _as_cluster_key(marker)
-        column_idx = None
-        if marker_key in terminal_clusters:
-            column_idx = terminal_clusters.index(marker_key)
-        elif columns is not None and marker in columns:
-            column_idx = columns.index(marker)
-        elif columns is not None and str(marker) in [str(column) for column in columns]:
-            column_idx = [str(column) for column in columns].index(str(marker))
-        elif isinstance(marker_key, (int, np.integer)) and 0 <= int(marker_key) < probabilities.shape[1]:
-            column_idx = int(marker_key)
-        if column_idx is not None and column_idx < probabilities.shape[1]:
-            selected.append((marker_key, column_idx))
-    if not selected:
-        selected = [
-            (terminal_clusters[idx] if idx < len(terminal_clusters) else idx, idx)
-            for idx in range(probabilities.shape[1])
-        ]
-    return selected
-
-
-def _plot_stavia_lineage_probability(
-    data,
-    *,
-    method="stavia",
-    model=None,
-    basis=None,
-    key="stavia",
-    x=0,
-    y=1,
-    idx=None,
-    cmap_name="plasma",
-    dpi=150,
-    scatter_size=None,
-    marker_lineages=None,
-    fontsize=8,
-    alpha_factor=0.9,
-    figsize=None,
-    frameon=None,
-    show_colorbar=True,
-    show=None,
-    save=None,
-    **_,
-):
-    adata, raw_model, basis, _, _ = _resolve_stavia_inputs(
-        data,
-        model=model,
-        basis=basis,
-        key=key,
-        require_cluster=False,
-    )
-    embedding_coords = np.asarray(adata.obsm[basis])[:, [x, y]]
-    probabilities, columns = _lineage_probability_matrix(adata, raw_model, key=key)
-    selected = _lineage_column_indices(raw_model, probabilities, columns, marker_lineages)
-    if idx is not None:
-        idx = np.asarray(idx, dtype=int)
-        embedding_coords = embedding_coords[idx]
-        probabilities = probabilities[idx]
-    if scatter_size is None:
-        scatter_size = float(np.clip(120000 / max(embedding_coords.shape[0], 1), 5, 60))
-
-    n_panels = len(selected)
-    if n_panels == 1:
-        ncols, nrows = 1, 1
-    elif n_panels == 2:
-        ncols, nrows = 1, 2
-    else:
-        ncols = min(3, int(np.ceil(np.sqrt(n_panels))))
-        nrows = int(np.ceil(n_panels / ncols))
-    if figsize is None:
-        figsize = (4.5 * ncols, 4.2 * nrows)
-    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, dpi=dpi, squeeze=False)
-
-    labels = getattr(raw_model, "labels", None)
-    true_label = getattr(raw_model, "true_label", None)
-    for panel_idx, (terminal, column_idx) in enumerate(selected):
-        ax = axs.flat[panel_idx]
-        values = probabilities[:, column_idx]
-        scatter = ax.scatter(
-            embedding_coords[:, 0],
-            embedding_coords[:, 1],
-            c=values,
-            cmap=cmap_name,
-            s=scatter_size,
-            alpha=alpha_factor,
-            linewidths=0,
-        )
-        title = str(terminal)
-        if labels is not None and true_label is not None:
-            label_array = np.asarray(labels)
-            true_array = np.asarray(true_label)
-            mask = label_array == terminal
-            if np.any(mask) and true_array.shape[0] == label_array.shape[0]:
-                mode = pd.Series(true_array[mask]).mode()
-                if len(mode) > 0:
-                    title = f"{terminal}-{mode.iloc[0]}"
-        ax.set_title(title, fontsize=fontsize)
-        if show_colorbar:
-            fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
-        _format_stavia_axis(ax, frameon=frameon)
-
-    for ax in axs.flat[n_panels:]:
-        ax.set_visible(False)
-    fig.tight_layout()
-    if save:
-        fig.savefig(save, dpi=dpi, bbox_inches="tight")
-    if show:
-        plt.show()
-    return fig, axs
-
-
 @register_function(
-    aliases=["trajectory_graph", "trajectory graph plot", "stavia graph", "轨迹图结构"],
+    aliases=["trajectory_graph", "trajectory graph plot", "轨迹图结构"],
     category="pl",
     description="Plot method-specific trajectory graph summaries through the OV plotting API.",
-    examples=["ov.pl.trajectory_graph(stavia, method='stavia')"],
-    related=["pl.trajectory_projection", "pl.plot_stream", "single.StaVIA"],
+    examples=["ov.pl.trajectory_graph(adata, method='paga', groups='clusters')"],
+    related=["pl.trajectory_projection", "pl.plot_stream"],
 )
 def trajectory_graph(
     data,
@@ -2724,40 +2052,25 @@ def trajectory_graph(
 ):
     """Plot a method-specific trajectory graph summary.
 
-    ``method='stavia'`` renders StaVIA's cluster-composition and pseudotime
-    graph summary. Monocle, PAGA, and Slingshot render their graph or fitted
-    curves on the corresponding embedding.
+    Monocle, PAGA, and Slingshot render their graph or fitted curves on the
+    corresponding embedding. For StaVIA/VIA, call the fitted VIA object
+    directly so native VIA plotting remains explicit.
     """
     method = "auto" if method is None else str(method).lower()
     if method == "auto":
         summary = getattr(data, "uns", {}).get(key, {})
         if _is_fitted_trajectory_wrapper(data) or _is_fitted_trajectory_wrapper(model) or summary.get("method") == "StaVIA":
-            method = "stavia"
+            _raise_native_via_plot_message("trajectory_graph")
         else:
             method = _normalize_method(data, method="auto", model=model)
     elif method not in {"stavia", "via"}:
         method = _normalize_method(data, method=method, model=model)
 
     if method in {"stavia", "via"}:
-        return _plot_stavia_graph(
-            data,
-            model=model,
-            basis=basis,
-            cluster_key=cluster_key,
-            key=key,
-            x=x,
-            y=y,
-            figsize=figsize,
-            dpi=dpi,
-            ax=ax,
-            ax1=ax1,
-            show=show,
-            save=save,
-            **kwargs,
-        )
+        _raise_native_via_plot_message("trajectory_graph")
 
     if ax1 is not None:
-        raise ValueError("`ax1` is only used for `method='stavia'`.")
+        raise ValueError("`ax1` is only used by native StaVIA/VIA plotting.")
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
     else:
@@ -2837,11 +2150,11 @@ def trajectory_graph(
 
 
 @register_function(
-    aliases=["trajectory_projection", "stavia trajectory projection", "trajectory curve projection", "轨迹投影图"],
+    aliases=["trajectory_projection", "trajectory curve projection", "轨迹投影图"],
     category="pl",
     description="Plot method-specific trajectory curves through the OV plotting API.",
-    examples=["ov.pl.trajectory_projection(stavia, method='stavia')"],
-    related=["pl.trajectory", "pl.trajectory_graph", "pl.plot_stream", "single.StaVIA"],
+    examples=["ov.pl.trajectory_projection(adata, method='paga', groups='clusters')"],
+    related=["pl.trajectory", "pl.trajectory_graph", "pl.plot_stream"],
 )
 def trajectory_projection(
     data,
@@ -2880,39 +2193,24 @@ def trajectory_projection(
 ):
     """Plot method-specific trajectory curves on an embedding.
 
-    StaVIA/VIA keeps the method-native two-panel curve projection. Monocle,
-    PAGA, and Slingshot are delegated to :func:`ov.pl.trajectory`, so the same
-    entry point can be used when the desired output is a projection onto an
-    embedding.
+    Monocle, PAGA, and Slingshot are delegated to :func:`ov.pl.trajectory`, so
+    the same entry point can be used when the desired output is a projection
+    onto an embedding. For StaVIA/VIA, call the fitted VIA object directly so
+    native VIA plotting remains explicit.
     """
     method = "auto" if method is None else str(method).lower()
     if method == "auto":
         if _is_stavia_result(data, model=model, key=key):
-            method = "stavia"
+            _raise_native_via_plot_message("trajectory_projection")
         else:
             method = _normalize_method(data, method="auto", model=model)
     elif method not in {"stavia", "via"}:
         method = _normalize_method(data, method=method, model=model)
 
     if method in {"stavia", "via"}:
-        return _plot_stavia_trajectory(
-            data,
-            model=model,
-            basis=basis,
-            cluster_key=cluster_key,
-            key=key,
-            x=x,
-            y=y,
-            figsize=figsize,
-            dpi=dpi,
-            ax=ax,
-            ax1=ax1,
-            show=show,
-            save=save,
-            **kwargs,
-        )
+        _raise_native_via_plot_message("trajectory_projection")
     if ax1 is not None:
-        raise ValueError("`ax1` is only used for `method='stavia'`.")
+        raise ValueError("`ax1` is only used by native StaVIA/VIA plotting.")
     projection_figsize = (
         (5, 4)
         if figsize is not None and tuple(figsize) == (10, 5)
@@ -2949,60 +2247,6 @@ def trajectory_projection(
         dpi=dpi,
         **kwargs,
     )
-
-
-@register_function(
-    aliases=[
-        "lineage_probability",
-        "lineage probability plot",
-        "stavia lineage probability",
-        "谱系概率图",
-    ],
-    category="pl",
-    description="Plot method-specific lineage probabilities through the OV plotting API.",
-    examples=["ov.pl.lineage_probability(stavia, method='stavia')"],
-    related=["pl.trajectory_projection", "pl.plot_stream", "single.StaVIA"],
-)
-def lineage_probability(
-    data,
-    *,
-    method="auto",
-    model=None,
-    basis=None,
-    key="stavia",
-    x=0,
-    y=1,
-    figsize=None,
-    dpi=150,
-    show=None,
-    save=None,
-    **kwargs,
-):
-    """Plot method-specific single-cell lineage probabilities."""
-    method = "auto" if method is None else str(method).lower()
-    if method == "auto":
-        summary = getattr(data, "uns", {}).get(key, {})
-        if _is_fitted_trajectory_wrapper(data) or _is_fitted_trajectory_wrapper(model) or summary.get("method") == "StaVIA":
-            method = "stavia"
-        else:
-            raise ValueError("Could not infer lineage-probability method. Pass `method='stavia'`.")
-
-    if method in {"stavia", "via"}:
-        return _plot_stavia_lineage_probability(
-            data,
-            method=method,
-            model=model,
-            basis=basis,
-            key=key,
-            x=x,
-            y=y,
-            figsize=figsize,
-            dpi=dpi,
-            show=show,
-            save=save,
-            **kwargs,
-        )
-    raise NotImplementedError("`ov.pl.lineage_probability` currently supports method='stavia'.")
 
 
 @register_function(

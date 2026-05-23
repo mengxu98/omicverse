@@ -291,17 +291,8 @@ def make_edgebundle_milestone(embedding: ndarray = None, sc_graph=None, via_obje
     else:
         edges['weight'] = 1
     print(f'{datetime.now()}\tMaking smooth edges')
-    try:
-        from datashader.bundling import hammer_bundle
-    except ImportError:
-        print(
-            f"{datetime.now()}\tdatashader is not installed. "
-            "Using straight milestone graph edges instead of hammer-bundled edges."
-        )
-        hb = straight_edge_bundle(nodes_mean, edges)
-    else:
-        hb = hammer_bundle(nodes_mean, edges, weight='weight', initial_bandwidth=initial_bandwidth,
-                           decay=decay)  # default bw=0.05, dec=0.7
+    hb = hammer_bundle(nodes_mean, edges, weight='weight', initial_bandwidth=initial_bandwidth,
+                       decay=decay)  # default bw=0.05, dec=0.7
     # hb.x and hb.y contain all the x and y coords of the points that make up the edge lines.
     # each new line segment is separated by a nan value
     # https://datashader.org/_modules/datashader/bundling.html#hammer_bundle

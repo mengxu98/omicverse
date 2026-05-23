@@ -23,6 +23,7 @@ import random
 from collections import Counter
 
 import scipy
+import pygam as pg
 from scipy.sparse.csgraph import minimum_spanning_tree, connected_components
 # import utils_sampling
 from matplotlib.animation import FuncAnimation, writers
@@ -32,60 +33,6 @@ from scipy.stats import spearmanr
 from scipy.stats import pearsonr
 from collections import defaultdict
 from tqdm.auto import tqdm
-
-
-class _SklearnKNNIndex:
-    """Small hnswlib-compatible KNN wrapper used when hnswlib is unavailable."""
-
-    def __init__(self, data: np.ndarray, *, distance: str = "l2", num_threads: int = -1):
-        metric = {"l2": "euclidean", "cosine": "cosine", "ip": "cosine"}.get(distance, distance)
-        n_jobs = None if num_threads in (None, -1) else num_threads
-        self.data = np.asarray(data)
-        self._index = NearestNeighbors(metric=metric, n_jobs=n_jobs)
-        self._index.fit(self.data)
-
-    def set_ef(self, *_args, **_kwargs):
-        return None
-
-    def knn_query(self, data, k: int):
-        query = np.asarray(data)
-        if query.ndim == 1:
-            query = query.reshape(1, -1)
-        k = max(1, min(int(k), self.data.shape[0]))
-        distances, labels = self._index.kneighbors(query, n_neighbors=k)
-        return labels, distances
-
-
-def _build_knn_index(
-    data: np.ndarray,
-    *,
-    distance: str,
-    num_threads: int,
-    too_big: bool,
-    knn: int,
-):
-    try:
-        import hnswlib
-    except ImportError:
-        return _SklearnKNNIndex(data, distance=distance, num_threads=num_threads)
-
-    k = max(1, knn + 1)
-    nsamples, dim = data.shape
-    ef_const, M = 200, 30
-    if not too_big:
-        if nsamples < 10000:
-            ef_const = max(1, min(nsamples - 1, 500))
-            k = max(1, min(nsamples - 1, 500))
-        if nsamples <= 50000 and dim > 30:
-            M = 48
-
-    p = hnswlib.Index(space=distance, dim=dim)
-    p.set_num_threads(num_threads)
-    p.init_index(max_elements=nsamples, ef_construction=ef_const, M=M)
-    p.add_items(data)
-    p.set_ef(k)
-    return p
-
 
 def collect_dictionary(obj):
     #obj is the dict to be inverted
@@ -186,13 +133,6 @@ def get_gene_trend(via_object, marker_lineages: list = [], df_gene_exp=None, n_s
     :param spline_order:
     :return: dict of dicts. First dict keys corresponding to terminal cluster of a lineage, second dict having keys "trends": entries with pandas DataFrame with genes (rows) x ("pseudotime") for that lineage and "name" : majority true label
     '''
-    try:
-        import pygam as pg
-    except ImportError as exc:
-        raise ImportError(
-            "`pygam` is required for VIA gene trend/GAM utilities. "
-            "Install it with `pip install pygam` or `pip install \"omicverse[full]\"`."
-        ) from exc
     sc_pt = via_object.single_cell_pt_markov
     sc_bp = via_object.single_cell_bp
     n_terminal_states = sc_bp.shape[1]
@@ -647,13 +587,26 @@ def construct_knn_utils(data: np.ndarray, too_big: bool = False, distance='l2', 
     -------
     Initialized instance of Index to be used over given data
     """
-    return _build_knn_index(
-        data,
-        distance=distance,
-        num_threads=num_threads,
-        too_big=too_big,
-        knn=knn,
-    )
+    import hnswlib
+    # if self.knn > 100:
+    # print(colored(f'Passed number of neighbors exceeds max value. Setting number of neighbors to 100'))
+    # k = min(100, self.knn + 1)
+    k = knn + 1  # since first knn is itself
+
+    nsamples, dim = data.shape
+    ef_const, M = 200, 30
+    if not too_big:
+        if nsamples < 10000:
+            k = ef_const = min(nsamples - 10, 500)
+        if nsamples <= 50000 and dim > 30:
+            M = 48  # good for scRNA-seq where dimensionality is high
+
+    p = hnswlib.Index(space=distance, dim=dim)
+    p.set_num_threads(num_threads)
+    p.init_index(max_elements=nsamples, ef_construction=ef_const, M=M)
+    p.add_items(data)
+    p.set_ef(k)
+    return p
 
 
 def spatial_knn(coords: np.ndarray, neighbors: np.ndarray, distances: np.ndarray, k_spatial: int,
@@ -959,15 +912,27 @@ def _construct_knn(data: np.ndarray, knn: int, distance: str, num_threads: int, 
     num_threads:int default =-1
     Returns
     -------
-    Initialized hnswlib-compatible index to be used over given data.
+    Initialized instance of hnswlib.Index to be used over given data
     """
-    return _build_knn_index(
-        data,
-        distance=distance,
-        num_threads=num_threads,
-        too_big=too_big,
-        knn=knn,
-    )
+    import hnswlib
+    k = knn + 1  # since first knn is itself
+
+    nsamples, dim = data.shape
+    ef_const, M = 200, 30
+    if not too_big:
+        if nsamples < 10000:
+            # k = ef_const = min(nsamples - 10, 500) #was this until Sept62023
+            ef_const = min(nsamples - 1, 500)
+            k = min(nsamples - 1, 500)
+        if nsamples <= 50000 and dim > 30:
+            M = 48  # good for scRNA-seq where dimensionality is high
+
+    p = hnswlib.Index(space=distance, dim=dim)
+    p.set_num_threads(num_threads)
+    p.init_index(max_elements=nsamples, ef_construction=ef_const, M=M)
+    p.add_items(data)
+    p.set_ef(k)
+    return p
 
 
 def getbb(sc, ax):
@@ -1018,6 +983,7 @@ def sc_loc_ofsuperCluster_PCAspace(p0, idx):
     :param idx: if using a subsampled PCA space for visualization. otherwise just range(0,n_samples)
     :return:
     '''
+    import hnswlib
     # ci_list first finds location in unsampled PCA space of the location of the super-cluster or sub-terminal-cluster and root
     # Returns location (index) of cell nearest to the ci_list in the downsampled space
     # print("dict of terminal state pairs, Super: sub: ", p1.dict_terminal_super_sub_pairs)
@@ -1047,13 +1013,10 @@ def sc_loc_ofsuperCluster_PCAspace(p0, idx):
             ci_list.append(labelsq[0][0])
 
         X_ds = p0.data[idx]
-        p_ds = _build_knn_index(
-            X_ds,
-            distance='l2',
-            num_threads=-1,
-            too_big=False,
-            knn=50,
-        )
+        p_ds = hnswlib.Index(space='l2', dim=p0.data.shape[1])
+        p_ds.init_index(max_elements=X_ds.shape[0], ef_construction=200, M=16)
+        p_ds.add_items(X_ds)
+        p_ds.set_ef(50)
 
         new_superclust_index_ds = {}
         for en_item, item in enumerate(ci_list):
@@ -1171,17 +1134,6 @@ def cosine_sim(A, B):
     return num / (p1 * p2)
 
 
-def straight_edge_bundle(nodes: pd.DataFrame, edges: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for source, target in edges[['source', 'target']].itertuples(index=False):
-        if source not in nodes.index or target not in nodes.index:
-            continue
-        rows.append((nodes.at[source, 'x'], nodes.at[source, 'y']))
-        rows.append((nodes.at[target, 'x'], nodes.at[target, 'y']))
-        rows.append((np.nan, np.nan))
-    return pd.DataFrame(rows, columns=['x', 'y'])
-
-
 def make_edgebundle_viagraph(layout=None, graph=None, initial_bandwidth=0.05, decay=0.9, edgebundle_pruning=0.5,
                              via_object=None):
     '''
@@ -1195,6 +1147,8 @@ def make_edgebundle_viagraph(layout=None, graph=None, initial_bandwidth=0.05, de
     :param edgebundle_pruning: float (0-1), smaller value means more pruning away edges that can be visualised. Only required when no layout is precomputed
     :return: hb hammerbundle class with hb.x and hb.y containing the coords
     '''
+    from datashader.bundling import connect_edges, hammer_bundle
+
     if (graph is None):# or (layout is None):
         graph = via_object.cluster_graph_csr_not_pruned
         edgeweights_layout, edges_layout, comp_labels_layout = pruning_clustergraph(graph,
@@ -1227,17 +1181,8 @@ def make_edgebundle_viagraph(layout=None, graph=None, initial_bandwidth=0.05, de
     edges = pd.DataFrame([e.tuple for e in graph.es], columns=['source', 'target'])
 
     edges['weight'] = graph.es['weight']
-    try:
-        from datashader.bundling import hammer_bundle
-    except ImportError:
-        print(
-            f"{datetime.now()}\tdatashader is not installed. "
-            "Using straight cluster graph edges instead of hammer-bundled edges."
-        )
-        hb = straight_edge_bundle(nodes, edges)
-    else:
-        hb = hammer_bundle(nodes, edges, weight='weight', initial_bandwidth=initial_bandwidth,
-                           decay=decay)  # default bw=0.05, dec=0.7
+    hb = hammer_bundle(nodes, edges, weight='weight', initial_bandwidth=initial_bandwidth,
+                       decay=decay)  # default bw=0.05, dec=0.7
     print(f'{datetime.now()}\tHammer dims: Nodes shape: {nodes.shape} Edges shape: {edges.shape}')
     # fig, ax = plt.subplots(figsize=(8, 8))
     # ax.plot(hb.x, hb.y, 'y', zorder=1, linewidth=3)
@@ -1265,6 +1210,7 @@ def _make_edgebundle_sc(embedding, sc_graph, initial_bandwidth=0.05, decay=0.70,
     :param decay: increasing decay increases merging of minor edges #https://datashader.org/user_guide/Networks.html
     :return: hb hammerbundle class with hb.x and hb.y containing the coords
     '''
+    from datashader.bundling import connect_edges, hammer_bundle
     print(f"{datetime.now()}\tComputing Edgebundling at single-cell level")
     data_node = [node for node in range(embedding.shape[0])]
     nodes = pd.DataFrame(data_node, columns=['id'])
@@ -1290,17 +1236,8 @@ def _make_edgebundle_sc(embedding, sc_graph, initial_bandwidth=0.05, decay=0.70,
     edges.drop('target_cluster', inplace=True, axis=1)
     edges.drop('source_cluster', inplace=True, axis=1)
 
-    try:
-        from datashader.bundling import hammer_bundle
-    except ImportError:
-        print(
-            f"{datetime.now()}\tdatashader is not installed. "
-            "Using straight single-cell graph edges instead of hammer-bundled edges."
-        )
-        hb = straight_edge_bundle(nodes, edges)
-    else:
-        hb = hammer_bundle(nodes, edges, weight='weight', initial_bandwidth=initial_bandwidth,
-                           decay=decay)  # default bw=0.05, dec=0.7
+    hb = hammer_bundle(nodes, edges, weight='weight', initial_bandwidth=initial_bandwidth,
+                       decay=decay)  # default bw=0.05, dec=0.7
 
     # fig, ax = plt.subplots(figsize=(8, 8))
     # ax.plot(hb.x, hb.y, 'y', zorder=1, linewidth=3)

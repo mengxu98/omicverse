@@ -6,17 +6,13 @@ from anndata import AnnData
 def _bulk2single_model():
     from omicverse.bulk2single._bulk2single import Bulk2Single
 
-    model = object.__new__(Bulk2Single.__wrapped__)
-    model.sc_ref = pd.DataFrame([[1.0]], index=["A"], columns=["g1"])
-    model.bulk_data = pd.DataFrame([[1.0]], index=["g1"], columns=["sample"])
-    model.single_data = AnnData(
+    bulk_data = pd.DataFrame([[1.0]], index=["g1"], columns=["sample"])
+    single_data = AnnData(
         np.array([[1.0]]),
         obs=pd.DataFrame({"celltype": ["A"]}, index=["cell"]),
         var=pd.DataFrame(index=["g1"]),
     )
-    model.bulk_group = None
-    model.celltype_key = "celltype"
-    return model
+    return Bulk2Single(bulk_data, single_data, celltype_key="celltype")
 
 
 def _prediction(index):

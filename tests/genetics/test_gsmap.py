@@ -98,6 +98,8 @@ def test_plot_manhattan_normalizes_sparse_counts(monkeypatch, tmp_path):
     runner = _gsmap_runner(adata, workdir=str(tmp_path), sample_name="sample")
     monkeypatch.setattr(runner, "_get_latent_adata", lambda: adata)
 
-    runner.plot_manhattan("trait", "sumstats.tsv.gz", show=False)
+    sumstats_file = tmp_path / "sumstats.tsv.gz"
+    sumstats_file.touch()
+    runner.plot_manhattan("trait", str(sumstats_file), show=False)
 
     assert calls == ["normalize", "log1p"]

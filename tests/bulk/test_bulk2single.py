@@ -49,7 +49,7 @@ def test_predicted_fraction_forwards_scaden_options(monkeypatch):
     assert "scaler" not in captured
 
 
-def test_predicted_fraction_keeps_tape_scaler(monkeypatch):
+def test_predicted_fraction_forwards_tape_options(monkeypatch):
     from omicverse.external import tape
 
     captured = {}
@@ -61,9 +61,17 @@ def test_predicted_fraction_keeps_tape_scaler(monkeypatch):
 
     monkeypatch.setattr(tape, "Deconvolution", fake_tape)
 
-    _bulk2single_model().predicted_fraction(method="tape", scaler="ss", epochs=1)
+    _bulk2single_model().predicted_fraction(
+        method="tape",
+        scaler="ss",
+        scale=False,
+        pseudobulk_size=7,
+        epochs=1,
+    )
 
     assert captured["scaler"] == "ss"
+    assert captured["scale"] is False
+    assert captured["pseudobulk_size"] == 7
 
 
 def _marker_stub(adata, groupby, method):

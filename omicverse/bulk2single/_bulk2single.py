@@ -171,9 +171,10 @@ class Bulk2Single:
         scale_size:int
             Scaling factor used to convert predicted fractions into cell counts.
         scale:bool
-            Whether Scaden applies min-max scaling before fitting.
+            Whether the selected deconvolution backend applies min-max scaling
+            before fitting.
         pseudobulk_size:int
-            Number of pseudo-bulk mixtures generated for Scaden training.
+            Number of pseudo-bulk mixtures generated for backend training.
 
         Returns
         -------
@@ -194,7 +195,8 @@ class Bulk2Single:
                             datatype=datatype, genelenfile=genelenfile,
                             mode=mode, adaptive=adaptive, variance_threshold=variance_threshold,
                             save_model_name=save_model_name,
-                            batch_size=batch_size, epochs=epochs, seed=seed)
+                            batch_size=batch_size, epochs=epochs, seed=seed,
+                            scale=scale, pseudobulk_size=pseudobulk_size)
             # Surface the signature matrix to the user.
             #   - mode='overall'         → DataFrame (cell-type × gene)
             #   - mode='high-resolution' → dict[cell_type, DataFrame(sample × gene)]

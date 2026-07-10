@@ -122,7 +122,8 @@ class Bulk2Single:
                         datatype='counts', genelenfile=None,
                         mode='overall', adaptive=True, variance_threshold=0.98,
                         save_model_name=None,
-                        batch_size=128, epochs=128, seed=1,scale_size=2):
+                        batch_size=128, epochs=128, seed=1,scale_size=2,
+                        scale=True, pseudobulk_size=2000):
         r"""
         Predict cell-type fractions from bulk RNA-seq data using deconvolution.
         
@@ -136,7 +137,8 @@ class Bulk2Single:
         sep:str
             Delimiter used for intermediate text matrix I/O.
         scaler:str
-            Scaling strategy used before model fitting.
+            Scaling strategy used by TAPE. Retained for compatibility when
+            ``method='scaden'``; use ``scale`` to configure Scaden scaling.
         datatype:str
             Expression data type passed to backend (for example ``'counts'``).
         genelenfile:str or None
@@ -168,6 +170,10 @@ class Bulk2Single:
             Random seed for reproducibility.
         scale_size:int
             Scaling factor used to convert predicted fractions into cell counts.
+        scale:bool
+            Whether Scaden applies min-max scaling before fitting.
+        pseudobulk_size:int
+            Number of pseudo-bulk mixtures generated for Scaden training.
 
         Returns
         -------
@@ -180,7 +186,8 @@ class Bulk2Single:
         if method=='scaden':
             CellFractionPrediction=ScadenDeconvolution(sc_ref,
                            self.bulk_data.T, sep=sep,
-                           batch_size=batch_size, epochs=epochs, scaler=scaler)
+                           batch_size=batch_size, epochs=epochs, scale=scale,
+                           pseudobulk_size=pseudobulk_size)
         elif method=='tape':
             SignatureMatrix, CellFractionPrediction = \
                 Deconvolution(sc_ref, self.bulk_data.T, sep=sep, scaler=scaler,

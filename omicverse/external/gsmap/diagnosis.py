@@ -268,7 +268,7 @@ def run_diagnosis(config: DiagnosisConfig):
     """Generate the intermediate plot and table assets consumed by the HTML report."""
 
     adata = sc.read_h5ad(config.hdf5_with_latent_path)
-    if "log1p" not in adata.uns and np.asarray(adata.X).max() > 14:
+    if "log1p" not in adata.uns and adata.X.max() > 14:
         sc.pp.normalize_total(adata, target_sum=1e4)
         sc.pp.log1p(adata)
 

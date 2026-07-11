@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 from anndata import AnnData
@@ -101,5 +103,30 @@ def test_plot_manhattan_normalizes_sparse_counts(monkeypatch, tmp_path):
     sumstats_file = tmp_path / "sumstats.tsv.gz"
     sumstats_file.touch()
     runner.plot_manhattan("trait", str(sumstats_file), show=False)
+
+    assert calls == ["normalize", "log1p"]
+
+
+def test_run_diagnosis_normalizes_sparse_counts(monkeypatch):
+    from omicverse.external.gsmap import diagnosis
+
+    adata = AnnData(
+        sparse.csr_matrix([[20.0], [1.0]]),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=["g1"]),
+    )
+    calls = []
+    monkeypatch.setattr(diagnosis.sc, "read_h5ad", lambda *args, **kwargs: adata)
+    monkeypatch.setattr(
+        diagnosis.sc.pp,
+        "normalize_total",
+        lambda *args, **kwargs: calls.append("normalize"),
+    )
+    monkeypatch.setattr(diagnosis.sc.pp, "log1p", lambda *args, **kwargs: calls.append("log1p"))
+    monkeypatch.setattr(diagnosis, "generate_gsmap_plot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(diagnosis, "generate_manhattan_plot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(diagnosis, "generate_gss_distribution", lambda *args, **kwargs: None)
+
+    diagnosis.run_diagnosis(SimpleNamespace(hdf5_with_latent_path="latent.h5ad", plot_type="all"))
 
     assert calls == ["normalize", "log1p"]

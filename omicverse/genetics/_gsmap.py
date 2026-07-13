@@ -448,7 +448,7 @@ class _gsmap_runner:
         )
 
         adata = self._get_latent_adata()
-        if "log1p" not in adata.uns and np.asarray(adata.X).max() > 14:
+        if "log1p" not in adata.uns and adata.X.max() > 14:
             sc.pp.normalize_total(adata, target_sum=1e4)
             sc.pp.log1p(adata)
 
@@ -745,9 +745,9 @@ class _gsmap_runner:
         )
 
         adata = self._get_latent_adata()
-        if "log1p" not in adata.uns and sc.pp._check_use_raw(adata, use_raw=False) is False:
+        if "log1p" not in adata.uns:
             try:
-                if np.asarray(adata.X).max() > 14:
+                if adata.X.max() > 14:
                     sc.pp.normalize_total(adata, target_sum=1e4)
                     sc.pp.log1p(adata)
             except Exception:

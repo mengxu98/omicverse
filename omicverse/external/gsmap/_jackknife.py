@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 
-np.seterr(divide="raise", invalid="raise")
-
 
 def _check_shape(x, y):
     """Check that x and y have the correct shapes."""
@@ -68,14 +66,18 @@ class LstsqJackknifeFast(Jackknife):
     """Fast linear-regression block jackknife."""
 
     def __init__(self, x, y, n_blocks=None, separators=None):
-        super().__init__(x, y, n_blocks=n_blocks, separators=separators)
-        xty_block_values, xtx_block_values = self.block_values(x, y, self.separators)
-        self.est = self.block_values_to_est(xty_block_values, xtx_block_values)
-        self.delete_values = self.block_values_to_delete_values(xty_block_values, xtx_block_values)
-        self.pseudovalues = self.delete_values_to_pseudovalues(self.delete_values, self.est)
-        (self.jknife_est, self.jknife_var, self.jknife_se, self.jknife_cov) = self.jknife(
-            self.pseudovalues
-        )
+        # Numerical failures are meaningful for the jackknife calculation, but
+        # must not alter NumPy's process-wide error policy when this module is
+        # imported by an application or test suite.
+        with np.errstate(divide="raise", invalid="raise"):
+            super().__init__(x, y, n_blocks=n_blocks, separators=separators)
+            xty_block_values, xtx_block_values = self.block_values(x, y, self.separators)
+            self.est = self.block_values_to_est(xty_block_values, xtx_block_values)
+            self.delete_values = self.block_values_to_delete_values(xty_block_values, xtx_block_values)
+            self.pseudovalues = self.delete_values_to_pseudovalues(self.delete_values, self.est)
+            (self.jknife_est, self.jknife_var, self.jknife_se, self.jknife_cov) = self.jknife(
+                self.pseudovalues
+            )
 
     @classmethod
     def block_values(cls, x, y, separators):

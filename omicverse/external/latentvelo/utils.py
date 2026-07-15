@@ -134,7 +134,9 @@ def _select_hvgs_from_log1p(adata, n_top_genes, subset=False):
         selection_X = np.log1p(selection_X)
     hvg_adata = ad.AnnData(X=selection_X, var=adata.var.copy())
 
-    highly_variable_genes(hvg_adata, n_top_genes=n_top_genes, subset=False)
+    highly_variable_genes(
+        hvg_adata, n_top_genes=n_top_genes, flavor='seurat', subset=False
+    )
     for key in (
         'highly_variable', 'means', 'dispersions', 'dispersions_norm',
         'highly_variable_rank', 'variances', 'variances_norm',

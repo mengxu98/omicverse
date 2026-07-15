@@ -10,7 +10,7 @@ import anndata as ad
 import gc
 from .velocity_genes import compute_velocity_genes
 
-from ...pp import umap,pca,neighbors,scale
+from ...pp import highly_variable_genes, umap, pca, neighbors, scale
 
 from ...pp._normalization import log1p
 
@@ -116,6 +116,40 @@ def _ensure_csr_local(adata):
             adata.obsp[k] = v.tocsr()
     return adata
 
+
+def _normalize_layer_by_size_factor(layer, size_factors):
+    """Scale rows while preserving an AnnData-supported sparse format."""
+    factors = np.asarray(size_factors).reshape(-1)
+    if scp.sparse.issparse(layer):
+        return layer.multiply(1.0 / factors[:, None]).tocsr()
+    return np.asarray(layer) / factors[:, None]
+
+
+def _select_hvgs_from_log1p(adata, n_top_genes, subset=False):
+    """Select HVGs from log1p data without changing the recipe input matrix."""
+    selection_X = adata.X.copy()
+    if scp.sparse.issparse(selection_X):
+        selection_X.data = np.log1p(selection_X.data)
+    else:
+        selection_X = np.log1p(selection_X)
+    hvg_adata = ad.AnnData(X=selection_X, var=adata.var.copy())
+
+    highly_variable_genes(
+        hvg_adata, n_top_genes=n_top_genes, flavor='seurat', subset=False
+    )
+    for key in (
+        'highly_variable', 'means', 'dispersions', 'dispersions_norm',
+        'highly_variable_rank', 'variances', 'variances_norm',
+        'highly_variable_nbatches', 'highly_variable_intersection',
+    ):
+        if key in hvg_adata.var:
+            adata.var[key] = hvg_adata.var[key]
+    if 'hvg' in hvg_adata.uns:
+        adata.uns['hvg'] = hvg_adata.uns['hvg']
+    if subset:
+        adata._inplace_subset_var(adata.var['highly_variable'].to_numpy())
+
+
 def unique_index(x):
     """
     find the index of the unique times for the ODE solver
@@ -219,8 +253,12 @@ def standard_clean_recipe(adata, spliced_key = 'spliced', unspliced_key = 'unspl
         spliced_all_size_factors = spliced_library_sizes/spliced_median_library_sizes
         unspliced_all_size_factors = unspliced_library_sizes/unspliced_median_library_sizes
         
-        adata.layers[spliced_key] = adata.layers[spliced_key]/spliced_all_size_factors
-        adata.layers[unspliced_key] = adata.layers[unspliced_key]/unspliced_all_size_factors
+        adata.layers[spliced_key] = _normalize_layer_by_size_factor(
+            adata.layers[spliced_key], spliced_all_size_factors
+        )
+        adata.layers[unspliced_key] = _normalize_layer_by_size_factor(
+            adata.layers[unspliced_key], unspliced_all_size_factors
+        )
 
         #adata.layers[spliced_key] = adata.layers[spliced_key].tocsr()
         #adata.layers[unspliced_key] = adata.layers[unspliced_key].tocsr()
@@ -231,7 +269,7 @@ def standard_clean_recipe(adata, spliced_key = 'spliced', unspliced_key = 'unspl
     adata.X = scp.sparse.csr_matrix(adata.layers[spliced_key].copy())
     
     if n_top_genes != None:
-        scv.pp.filter_genes_dispersion(adata, n_top_genes = n_top_genes, subset=False)
+        _select_hvgs_from_log1p(adata, n_top_genes=n_top_genes)
         
         if retain_genes == None and 'highly_variable' in adata.var.columns.values:
             print('Choosing top '+str(n_top_genes) + ' genes')
@@ -445,8 +483,12 @@ def anvi_clean_recipe(adata, spliced_key = 'spliced', unspliced_key = 'unspliced
         spliced_all_size_factors = spliced_library_sizes/spliced_median_library_sizes
         unspliced_all_size_factors = unspliced_library_sizes/unspliced_median_library_sizes
         
-        adata.layers[spliced_key] = adata.layers[spliced_key]/spliced_all_size_factors
-        adata.layers[unspliced_key] = adata.layers[unspliced_key]/unspliced_all_size_factors
+        adata.layers[spliced_key] = _normalize_layer_by_size_factor(
+            adata.layers[spliced_key], spliced_all_size_factors
+        )
+        adata.layers[unspliced_key] = _normalize_layer_by_size_factor(
+            adata.layers[unspliced_key], unspliced_all_size_factors
+        )
         
         adata.obs['spliced_size_factor'] = spliced_library_sizes #spliced_all_size_factors
         adata.obs['unspliced_size_factor'] = unspliced_library_sizes #unspliced_all_size_factors
@@ -455,7 +497,7 @@ def anvi_clean_recipe(adata, spliced_key = 'spliced', unspliced_key = 'unspliced
     adata.X = scp.sparse.csr_matrix(adata.layers[spliced_key].copy())
     
     if n_top_genes != None:
-        scv.pp.filter_genes_dispersion(adata, n_top_genes = n_top_genes, subset=False)
+        _select_hvgs_from_log1p(adata, n_top_genes=n_top_genes)
 
         # Convert COO matrices to CSR before subsetting (COO doesn't support indexing)
         for layer_key in [spliced_key, unspliced_key]:
@@ -639,8 +681,12 @@ def atac_clean_recipe(adata, spliced_key = 'spliced', unspliced_key = 'unspliced
         spliced_all_size_factors = spliced_library_sizes/spliced_median_library_sizes
         unspliced_all_size_factors = unspliced_library_sizes/unspliced_median_library_sizes
         
-        adata.layers[spliced_key] = adata.layers[spliced_key]/spliced_all_size_factors
-        adata.layers[unspliced_key] = adata.layers[unspliced_key]/unspliced_all_size_factors
+        adata.layers[spliced_key] = _normalize_layer_by_size_factor(
+            adata.layers[spliced_key], spliced_all_size_factors
+        )
+        adata.layers[unspliced_key] = _normalize_layer_by_size_factor(
+            adata.layers[unspliced_key], unspliced_all_size_factors
+        )
         
         adata.obs['spliced_size_factor'] = spliced_all_size_factors
         adata.obs['unspliced_size_factor'] = unspliced_all_size_factors
@@ -649,7 +695,7 @@ def atac_clean_recipe(adata, spliced_key = 'spliced', unspliced_key = 'unspliced
     adata.X = scp.sparse.csr_matrix(adata.layers[spliced_key].copy())
     
     if n_top_genes != None:
-        scv.pp.filter_genes_dispersion(adata, n_top_genes = n_top_genes)
+        _select_hvgs_from_log1p(adata, n_top_genes=n_top_genes, subset=True)
 
     adata.layers['mask_spliced'] = ((adata.layers[spliced_key] > 0) )*1
     adata.layers['mask_unspliced'] = ((adata.layers[unspliced_key] > 0))*1

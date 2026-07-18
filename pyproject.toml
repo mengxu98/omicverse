@@ -76,6 +76,7 @@ dependencies = [
     'requests>=2.0',
     'transformers>=0.30',
     'marsilea!=0.5.6',
+    'legendkit>=0.5.0',
     #'wandb',
     'openai>=1.0',
     'omicverse-skills>=0.3.0',

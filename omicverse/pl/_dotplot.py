@@ -163,7 +163,7 @@ def dotplot(
     
     Returns:
         If `return_fig` is True, returns the figure object.
-        If `show` is False, returns axes dictionary.
+        If `show` is False, returns the rendered Marsilea board.
     """
     marsilea_version = getattr(ma, "__version__", "")
     if marsilea_version.startswith("0.5.6"):
@@ -641,7 +641,7 @@ def rank_genes_groups_dotplot(
     
     Returns:
         If `return_fig` is True, returns the figure object.
-        If `show` is False, returns axes dictionary.
+        If `show` is False, returns the rendered Matplotlib figure.
     
     Examples:
         >>> # Basic usage with top genes

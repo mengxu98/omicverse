@@ -3,6 +3,8 @@ import numpy as np
 from anndata import AnnData
 
 from omicverse.pl import _scatterplot_backend as scatterplot
+
+
 def test_continuous_embedding_does_not_use_axes_grid1_inset_axes(monkeypatch):
     import mpl_toolkits.axes_grid1.inset_locator as inset_locator
 

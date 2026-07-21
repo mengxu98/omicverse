@@ -187,4 +187,193 @@ def plot_sequence_logo(sequences: Sequence[str], alphabet: str = "auto",
     return fig, ax
 
 
-__all__ = ["view_primers", "view_construct", "plot_sequence_logo"]
+@register_function(
+    aliases=["plot_pegrna", "pegRNA图", "先导编辑图", "pegrna_map", "prime_edit_plot",
+             "引导编辑图", "pegRNA可视化"],
+    category="synthetic_biology",
+    description="pegRNA 可视化:在靶位点上画出 spacer(原型间隔)、切口(nick)、PBS、RT 模板(RTT,含编辑)、编辑位点与 PE3 二级切口,直观展示一次 prime editing 设计。Draw a pegRNA (spacer / nick / PBS / RTT / edit / PE3 nick) on the target locus.",
+    examples=[
+        "peg = ov.synbio.prime_editing_design(locus, edit_pos=60, ref='A', alt='G')[0]",
+        "ov.synbio.plot_pegrna(locus, peg, edit_pos=60)",
+    ],
+    related=["synbio.prime_editing_design", "synbio.view_primers", "synbio.view_construct"],
+    requires={},
+    produces={},
+)
+def plot_pegrna(locus: str, pegrna, edit_pos: int, ax=None,
+                figure_width: float = 9, label: Optional[str] = None):
+    """Draw a pegRNA's components on *locus* (SnapGene-style feature map).
+
+    Shows the protospacer (strand arrow), the Cas9 nick, the primer-binding
+    site (PBS) and RT template (RTT, which carries the edit), the edit position,
+    and — if present — the PE3 secondary-nick guide."""
+    dfv = _dfv("plot_pegrna")
+    t = locus.upper().replace("U", "T")
+    sp = pegrna.spacer.upper()
+    strand = 1 if pegrna.strand == "+" else -1
+    s0 = t.find(sp) if strand == 1 else t.find(_revcomp(sp))
+    nick = int(pegrna.nick_position)
+    pbs_len, rtt_len = len(pegrna.pbs), len(pegrna.rtt)
+
+    feats = []
+    if s0 >= 0:
+        feats.append(dfv.GraphicFeature(
+            start=s0, end=s0 + len(sp), strand=strand,
+            color=_FEATURE_COLORS["primer"], label="spacer"))
+    # PBS binds just 5' of the nick on the nicked strand; RTT (the edit) 3' of it
+    if strand == 1:
+        feats.append(dfv.GraphicFeature(start=max(0, nick - pbs_len), end=nick,
+                     strand=0, color="#FBB4AE", label="PBS"))
+        feats.append(dfv.GraphicFeature(start=nick, end=nick + rtt_len, strand=0,
+                     color="#B3CDE3", label="RTT (edit)"))
+    else:
+        feats.append(dfv.GraphicFeature(start=nick, end=nick + pbs_len, strand=0,
+                     color="#FBB4AE", label="PBS"))
+        feats.append(dfv.GraphicFeature(start=max(0, nick - rtt_len), end=nick,
+                     strand=0, color="#B3CDE3", label="RTT (edit)"))
+    feats.append(dfv.GraphicFeature(start=nick - 1, end=nick + 1, strand=0,
+                 color=_FEATURE_COLORS["terminator"], label="nick"))
+    feats.append(dfv.GraphicFeature(start=edit_pos, end=edit_pos + 1, strand=0,
+                 color=_FEATURE_COLORS["promoter"], label=f"edit {pegrna.edit}"))
+    pe3 = getattr(pegrna, "pe3_nick", None)
+    if pe3 and pe3.get("spacer"):
+        p = pe3["spacer"].upper()
+        q0 = t.find(p)
+        if q0 < 0:
+            q0 = t.find(_revcomp(p))
+        if q0 >= 0:
+            feats.append(dfv.GraphicFeature(
+                start=q0, end=q0 + len(p), strand=-strand,
+                color="#FDCDAC", label="PE3 nick"))
+
+    record = dfv.GraphicRecord(sequence_length=len(t), features=feats)
+    if ax is None:
+        ax, _ = record.plot(figure_width=figure_width)
+    else:
+        record.plot(ax=ax)
+    prefix = f"{label} — " if label else ""
+    ax.set_title(f"{prefix}pegRNA on target ({pegrna.strand} strand, "
+                 f"PBS{pbs_len}/RTT{rtt_len})", fontsize=11)
+    return ax
+
+
+@register_function(
+    aliases=["plot_binding_sites", "结合位点图", "靶向图", "binding_map",
+             "siRNA图", "反义位点图", "guide_map", "靶点图"],
+    category="synthetic_biology",
+    description="靶向试剂结合位点图:把 siRNA / 反义寡核苷酸 / Cas13 crRNA / gRNA 在靶转录本上的结合窗口画成注释箭头,一眼看清各试剂打在哪里。Map siRNA / ASO / Cas13 crRNA / guide binding sites onto a target transcript.",
+    examples=[
+        "si = ov.synbio.sirna_design(mrna); aso = ov.synbio.aso_design(mrna)",
+        "ov.synbio.plot_binding_sites(mrna, sirnas=si, asos=aso)",
+    ],
+    related=["synbio.sirna_design", "synbio.aso_design", "synbio.design_cas13_guides",
+             "synbio.crispr_regulation"],
+    requires={},
+    produces={},
+)
+def plot_binding_sites(transcript: str, sirnas=None, asos=None,
+                       cas13_guides=None, guides=None, guide_len: int = 20,
+                       ax=None, figure_width: float = 9,
+                       title: str = "binding sites on target"):
+    """Draw where antisense / guide reagents bind on *transcript*.
+
+    Pass the result lists directly — ``sirnas`` (:class:`SiRNA`), ``asos``
+    (:class:`ASO`), ``cas13_guides`` (:class:`Cas13Guide`) or generic ``guides``
+    (objects with ``.start`` / ``.strand``, e.g. CRISPRi RegGuides). Each is
+    drawn as a coloured, labelled feature at its binding window."""
+    dfv = _dfv("plot_binding_sites")
+    t = transcript.upper().replace("U", "T")
+    feats = []
+    for i, s in enumerate(sirnas or []):
+        feats.append(dfv.GraphicFeature(
+            start=s.position, end=s.position + len(s.sense), strand=-1,
+            color="#F0894A", label=f"siRNA{i + 1}"))
+    for i, a in enumerate(asos or []):
+        feats.append(dfv.GraphicFeature(
+            start=a.position, end=a.position + len(a.aso), strand=-1,
+            color="#B39DDB", label=f"ASO{i + 1}"))
+    for i, g in enumerate(cas13_guides or []):
+        feats.append(dfv.GraphicFeature(
+            start=g.position, end=g.position + len(g.spacer), strand=+1,
+            color="#2C7FB8", label=f"crRNA{i + 1}"))
+    for i, g in enumerate(guides or []):
+        st = 1 if getattr(g, "strand", "+") == "+" else -1
+        feats.append(dfv.GraphicFeature(
+            start=int(g.start), end=int(g.start) + guide_len, strand=st,
+            color="#7DBF6A", label=f"gRNA{i + 1}"))
+    if not feats:
+        raise ValueError("没有可画的结合位点(传入 sirnas/asos/cas13_guides/guides 之一)。")
+
+    record = dfv.GraphicRecord(sequence_length=len(t), features=feats)
+    if ax is None:
+        ax, _ = record.plot(figure_width=figure_width)
+    else:
+        record.plot(ax=ax)
+    ax.set_title(f"{title} ({len(t)} nt, {len(feats)} sites)", fontsize=11)
+    return ax
+
+
+def _pairs_from_dotbracket(structure: str):
+    """Return the list of (i, j) base pairs from a dot-bracket string."""
+    stack, pairs = [], []
+    for i, c in enumerate(structure):
+        if c == "(":
+            stack.append(i)
+        elif c == ")" and stack:
+            pairs.append((stack.pop(), i))
+    return pairs
+
+
+@register_function(
+    aliases=["plot_rna_structure", "RNA结构图", "rna_structure_plot", "弧线图",
+             "二级结构图", "arc_diagram", "rna_arc"],
+    category="synthetic_biology",
+    description="RNA 二级结构弧线图:碱基排成一行,配对以半圆弧连接(按 G-C/A-U/G-U 上色),直观展示折叠。Arc-diagram of an RNA secondary structure (dot-bracket) coloured by pair type.",
+    examples=[
+        "s = ov.synbio.rna_fold(seq)",
+        "ov.synbio.plot_rna_structure(s.sequence, s.structure)",
+    ],
+    related=["synbio.rna_fold", "synbio.rna_inverse_design", "synbio.mrna_design"],
+    requires={},
+    produces={},
+)
+def plot_rna_structure(sequence: str, structure: str, ax=None,
+                       title: str = "RNA secondary structure"):
+    """Draw an arc diagram of *structure* (dot-bracket) over *sequence*.
+
+    Bases sit on a line; each base pair is a semicircular arc, coloured by pair
+    type (G-C blue, A-U orange, G-U/other grey). Compact and dependency-free."""
+    import numpy as np
+    from ._plot import _mpl
+    plt = _mpl()
+
+    seq = sequence.upper().replace("T", "U")
+    pairs = _pairs_from_dotbracket(structure)
+    L = len(structure)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(max(4, 0.14 * L), max(2.0, 0.045 * L + 1.4)))
+    else:
+        fig = ax.figure
+    colours = {"GC": "#2C7FB8", "CG": "#2C7FB8", "AU": "#F0894A",
+               "UA": "#F0894A", "GU": "#9E9E9E", "UG": "#9E9E9E"}
+    for i, j in pairs:
+        pair = (seq[i] + seq[j]) if i < len(seq) and j < len(seq) else "??"
+        col = colours.get(pair, "#C9C9C9")
+        centre, rad = (i + j) / 2.0, (j - i) / 2.0
+        th = np.linspace(0, np.pi, 40)
+        ax.plot(centre + rad * np.cos(th), rad * np.sin(th), color=col, lw=1.3)
+    ax.plot([0, L - 1], [0, 0], color="k", lw=1.2, zorder=0)
+    ax.scatter(range(L), [0] * L, s=6, c="k", zorder=3)
+    ax.set_ylim(-0.05 * L - 1, 0.5 * L + 1)
+    ax.set_xlim(-1, L)
+    ax.set_yticks([])
+    ax.set_xlabel(f"position (nt) — {len(pairs)} base pairs")
+    ax.set_title(title, fontsize=11)
+    for s in ("top", "right", "left"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    return fig, ax
+
+
+__all__ = ["view_primers", "view_construct", "plot_sequence_logo",
+           "plot_rna_structure"]

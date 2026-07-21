@@ -436,15 +436,25 @@ def mads_test(meta, cov, nmads=5, lt=None, batch_key=None):
 _CE_MT_PREFIXES = ('ctc-', 'nduo-', 'ctb-')
 
 
+# Minimum pyscdblfinder that ships the O(N·k) kNN doublet features. Earlier
+# releases (<=0.1.0) built a full N×N distance matrix in the neighbour step,
+# which needs ~N²·8 bytes (≈125 GB at 100k cells) and thrashes swap — the
+# process shows near-zero CPU and never finishes on large atlases (issue #848).
+_MIN_PYSCDBLFINDER = "0.2.0"
+
+
 def _resolve_doublets_method(method: str) -> str:
     """Resolve a doublets_method string, falling back gracefully when the
-    requested backend's package is not installed.
+    requested backend's package is missing or too old.
 
     `scdblfinder` (default) requires `pyscdblfinder`; if it's missing we
     print a single-line install hint and fall back to `scrublet` (which
-    has lazy imports of its own and is broadly available). Other methods
-    pass through unchanged — their wrappers raise their own ImportError
-    with installation instructions.
+    has lazy imports of its own and is broadly available). If an outdated
+    pyscdblfinder (<0.2.0) is installed we also fall back to `scrublet`,
+    because those versions stall for hours with near-zero CPU on large
+    datasets (issue #848) — the pipeline should finish rather than hang.
+    Other methods pass through unchanged — their wrappers raise their own
+    ImportError with installation instructions.
     """
     if method == 'scdblfinder':
         try:
@@ -456,7 +466,25 @@ def _resolve_doublets_method(method: str) -> str:
             )
             print(
                 f"   {Colors.CYAN}💡 Install with: "
-                f"`pip install pyscdblfinder` to use the new default.{Colors.ENDC}"
+                f"`pip install \"pyscdblfinder>={_MIN_PYSCDBLFINDER}\"` "
+                f"to use the new default.{Colors.ENDC}"
+            )
+            return 'scrublet'
+        # Version read from distribution metadata (not pyscdblfinder.__version__,
+        # which 0.2.0 ships stale as '0.1.0'); helper lives in utils so other
+        # optional backends can reuse the same gate.
+        from ..utils._versions import version_at_least
+        ok, ver = version_at_least('pyscdblfinder', _MIN_PYSCDBLFINDER)
+        if ver is not None and not ok:
+            print(
+                f"   {Colors.WARNING}⚠️  pyscdblfinder {ver} has a known "
+                f"large-dataset stall (near-zero CPU for hours on ~100k+ "
+                f"cells; issue #848); falling back to 'scrublet'.{Colors.ENDC}"
+            )
+            print(
+                f"   {Colors.CYAN}💡 Upgrade with: "
+                f"`pip install -U \"pyscdblfinder>={_MIN_PYSCDBLFINDER}\"` "
+                f"to use scdblfinder on large data.{Colors.ENDC}"
             )
             return 'scrublet'
     return method

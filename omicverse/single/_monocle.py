@@ -34,6 +34,105 @@ from .._registry import register_function
 # ``__init__`` and stores it on the instance as ``self._m2``.
 
 
+def _cell_mst_graph(adata: AnnData):
+    """The cell-level weighted MST for whichever reduction was run, or None.
+
+    The two reductions store it in different places, and only one of them
+    stores it under ``projected_dp``:
+
+    * **DDRTree** builds the principal graph over Y-CENTRES, then
+      ``_project_cells_to_mst`` projects cells onto it and writes the
+      cell-level tree to ``projected_dp``.
+    * **ICA** has no centres — its MST is already over cells, and
+      ``cellPairwiseDistances`` is the cell x cell distance matrix it was
+      built from. Nothing ever writes ``projected_dp``.
+
+    Reading ``projected_dp`` alone therefore works on DDRTree and raises on
+    ICA, which is what it did. The shape check below is not decoration: on
+    DDRTree ``cellPairwiseDistances`` is CENTRES x CENTRES, so using it
+    unconditionally would silently index the wrong graph.
+    """
+    from scipy.sparse import csr_matrix, issparse
+    from scipy.sparse.csgraph import minimum_spanning_tree
+
+    monocle = adata.uns.get('monocle', {})
+    graph = monocle.get('projected_dp')
+    if graph is not None:
+        return csr_matrix(graph) if not issparse(graph) else graph.tocsr()
+
+    dp = monocle.get('cellPairwiseDistances')
+    if dp is None:
+        return None
+    dp = np.asarray(dp, dtype=float)
+    if dp.shape != (adata.n_obs, adata.n_obs):
+        return None                       # centres, not cells — wrong graph
+    return minimum_spanning_tree(csr_matrix(dp)).tocsr()
+
+
+def _population_graph_medoid(adata: AnnData, mask: pd.Series) -> str:
+    """Return a matching cell minimizing distance to the target population.
+
+    On a tree, all-node sums of distances to a weighted target set can be
+    computed in linear time by rerooting the tree. Restricting the final
+    minimum to matching cells gives a deterministic, representative root
+    without materializing an all-pairs distance matrix.
+    """
+
+    graph = _cell_mst_graph(adata)
+    target = np.asarray(mask, dtype=bool)
+    target_indices = np.flatnonzero(target)
+    if target_indices.size == 0:
+        raise ValueError("Cannot select a root medoid without target cells")
+    if graph is None:
+        raise ValueError(
+            "Cannot select a root medoid: no cell-level MST is available for "
+            f"dim_reduce_type="
+            f"{adata.uns.get('monocle', {}).get('dim_reduce_type')!r}. "
+            "Run reduce_dimension() with DDRTree or ICA before order_cells()."
+        )
+
+    graph = graph.tocsr().maximum(graph.T.tocsr()).tocsr()
+    n_obs = adata.n_obs
+    parent = np.full(n_obs, -2, dtype=int)
+    edge_to_parent = np.zeros(n_obs, dtype=float)
+    distance_from_zero = np.zeros(n_obs, dtype=float)
+    parent[0] = -1
+    stack = [0]
+    traversal = []
+    while stack:
+        node = stack.pop()
+        traversal.append(node)
+        for offset in range(graph.indptr[node], graph.indptr[node + 1]):
+            neighbor = int(graph.indices[offset])
+            if neighbor == parent[node] or parent[neighbor] != -2:
+                continue
+            parent[neighbor] = node
+            weight = float(graph.data[offset])
+            edge_to_parent[neighbor] = weight
+            distance_from_zero[neighbor] = distance_from_zero[node] + weight
+            stack.append(neighbor)
+    if len(traversal) != n_obs:
+        raise ValueError("Cell projection MST is disconnected")
+
+    subtree_targets = target.astype(int)
+    for node in reversed(traversal[1:]):
+        subtree_targets[parent[node]] += subtree_targets[node]
+
+    total_targets = int(target_indices.size)
+    distance_sum = np.empty(n_obs, dtype=float)
+    distance_sum[0] = float(distance_from_zero[target].sum())
+    for node in traversal[1:]:
+        distance_sum[node] = (
+            distance_sum[parent[node]]
+            + edge_to_parent[node]
+            * (total_targets - 2 * subtree_targets[node])
+        )
+    root_index = int(
+        target_indices[np.argmin(distance_sum[target_indices])]
+    )
+    return str(adata.obs_names[root_index])
+
+
 @register_function(
     aliases=["Monocle", "monocle", "monocle2", "monocle 2", "DDRTree trajectory", "BEAM"],
     category="trajectory",
@@ -320,7 +419,9 @@ class Monocle:
                           reduction_method: str = 'DDRTree',
                           norm_method: str = 'log',
                           method: str = 'fast',
-                          verbose: bool = False, **kwargs):
+                          verbose: bool = False,
+                          residualModelFormulaStr: Optional[str] = None,
+                          **kwargs):
         """
         Reduce dimensionality and learn the principal graph.
 
@@ -345,6 +446,13 @@ class Monocle:
               full objective (including the expensive ``||X − WZ||_2^2``
               term) on every iteration and terminates when it stops
               decreasing.  Pass this when you need bitwise R parity.
+        residualModelFormulaStr : str or None
+            Patsy/R-style model formula specifying cell-level effects to
+            subtract before scaling and dimension reduction, for example
+            ``"~ batch"`` or ``"~ batch + percent_mito"``. This is the
+            pure-Python equivalent of R Monocle 2's parameter of the same
+            name. The formula must include an intercept and reference columns
+            in ``adata.obs``.
         **kwargs : additional DDRTree parameters
             ``ncenter``, ``lambda_param``, ``param_gamma``, ``sigma``,
             ``maxIter``, ``tol``.
@@ -353,14 +461,16 @@ class Monocle:
             self.adata, max_components=max_components,
             reduction_method=reduction_method,
             norm_method=norm_method, verbose=verbose,
-            method=method, **kwargs,
+            method=method,
+            residualModelFormulaStr=residualModelFormulaStr,
+            **kwargs,
         )
         self._reduced = True
         return self
 
     def order_cells(self, root_state=None, reverse: Optional[bool] = None,
                     root_by_column: Optional[str] = None,
-                    root_by_value=None):
+                    root_by_value=None, root_cell: Optional[str] = None):
         """Order cells along the learned trajectory, assigning Pseudotime and State.
 
         Parameters
@@ -373,11 +483,16 @@ class Monocle:
             If ``True``, flip the default diameter-endpoint choice
             (match R's ``orderCells(reverse=TRUE)``).
         root_by_column : str or None
-            Name of a column in ``mono.adata.obs``. If given, the
-            state with the most cells matching ``root_by_value`` in
-            that column is auto-chosen as the root state. This
-            replicates R Monocle 2's ``GM_state()`` tutorial helper —
-            e.g. for HSMM::
+            Name of a column in ``mono.adata.obs``. If given, the cell
+            minimising total tree distance to the matching population — its
+            graph medoid — is chosen as an exact root cell.
+
+            This is stricter than R Monocle 2's ``GM_state()`` helper, which
+            returns the *State* holding most of the progenitor cells and lets
+            ordering pick any cell within it. Anchoring on a specific cell
+            stops a State that mixes progenitors with other cells from
+            silently rooting the trajectory in the wrong population. The
+            calling pattern is unchanged — e.g. for HSMM::
 
                 mono.order_cells()                 # first pass
                 mono.order_cells(root_by_column='Hours',
@@ -388,6 +503,10 @@ class Monocle:
         root_by_value
             Value within ``root_by_column`` that marks the progenitor
             population. Defaults to the column minimum.
+        root_cell : str or None
+            Exact observation name to use as the root. When
+            ``root_by_column`` is supplied, Monocle chooses the matching
+            population's graph medoid and uses it as this exact anchor.
         """
         # Auto-detect root_state from a metadata column if requested.
         # Requires a previous order_cells() call so that `State` exists.
@@ -409,14 +528,20 @@ class Monocle:
                 raise ValueError(
                     f"No cells matched {root_by_column}={target!r}"
                 )
-            counts = self.adata.obs.loc[mask, 'State'].value_counts()
-            if counts.empty:
-                raise ValueError("No State values under the selected mask")
-            root_state = counts.idxmax()
+            root_cell = _population_graph_medoid(self.adata, mask)
+            # An exact population medoid supersedes the State-only heuristic.
+            root_state = None
 
         self.adata = self._m2.order_cells(
             self.adata, root_state=root_state, reverse=reverse,
+            root_cell=root_cell,
         )
+        if root_by_column is not None:
+            self.adata.uns['monocle']['root_by_column'] = root_by_column
+            self.adata.uns['monocle']['root_by_value'] = str(target)
+            self.adata.uns['monocle']['root_selection_method'] = (
+                'target_population_graph_medoid'
+            )
         self._ordered = True
         return self
 

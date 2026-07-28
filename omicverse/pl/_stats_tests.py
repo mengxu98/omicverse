@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from .._registry import register_function
-from ._stats_common import group_levels
+from ._stats_common import font_size, group_levels
 
 __all__ = ["compare_groups", "format_pvalue", "add_stat_annotation"]
 
@@ -37,6 +37,19 @@ _CATEGORICAL_TESTS = {"fisher", "chi2"}
 _STAR_CUTOFFS = ((1e-4, "****"), (1e-3, "***"), (1e-2, "**"), (0.05, "*"))
 
 
+@register_function(
+    aliases=["P值格式化", "format_pvalue", "显著性星号", "p_value_stars", "星号标注"],
+    category="pl",
+    description=(
+        "Render a P value as stars, as a number, or as both — the same formatting the significance brackets use"
+    ),
+    examples=[
+        "ov.pl.format_pvalue(0.003)            # -> '**'",
+        'ov.pl.format_pvalue(0.003, "value")   # -> \'P = 0.003\'',
+        'ov.pl.format_pvalue(1e-8, "full")     # -> \'**** (P = 1.0e-08)\'',
+    ],
+    related=["pl.compare_groups", "pl.add_stat_annotation"],
+)
 def format_pvalue(p: float, style: str = "star") -> str:
     """Render a P value as stars, as a number, or as both.
 
@@ -416,7 +429,7 @@ def add_stat_annotation(ax,
                     linewidth=linewidth, color=color, clip_on=False,
                     transform=transform, solid_joinstyle="miter")
             ax.text((left + right) / 2, level + span * text_offset, text,
-                    ha="center", va="bottom", fontsize=fontsize, color=color,
+                    ha="center", va="bottom", fontsize=font_size(fontsize), color=color,
                     clip_on=False)
         else:
             ax.plot([level - cap, level, level, level - cap],
@@ -424,7 +437,7 @@ def add_stat_annotation(ax,
                     linewidth=linewidth, color=color, clip_on=False,
                     transform=transform, solid_joinstyle="miter")
             ax.text(level + span * text_offset, (left + right) / 2, text,
-                    ha="left", va="center", fontsize=fontsize, color=color,
+                    ha="left", va="center", fontsize=font_size(fontsize), color=color,
                     rotation=270, clip_on=False)
         reached = max(reached, level + span * (text_offset + line_height * 0.6))
 

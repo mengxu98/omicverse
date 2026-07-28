@@ -721,3 +721,348 @@ class TestSurface:
         # ov.pl.violin still takes an AnnData; ov.pl.violinplot takes a frame
         assert pl.violin is not pl.violinplot
         assert pl.boxplot is not pl.barplot
+
+
+class TestKdeCut:
+    """``cut`` must mean bandwidths, as it does in seaborn and R.
+
+    It was implemented as a fraction of the data *range* (``cut * span / 6``),
+    so the default ``cut=2`` extended every density by a third of the range in
+    each direction. That single line is what made ``ov.pl.violinplot`` look
+    like a smudge next to ``ov.pl.violin``.
+    """
+
+    @staticmethod
+    def _sample():
+        return np.random.default_rng(0).normal(size=500)
+
+    def test_cut_zero_stops_at_the_data(self):
+        from omicverse.pl._stats_common import kde_curve
+
+        values = self._sample()
+        grid, _ = kde_curve(values, cut=0)
+        assert grid.min() == pytest.approx(values.min())
+        assert grid.max() == pytest.approx(values.max())
+
+    def test_cut_extends_by_exactly_that_many_bandwidths(self):
+        from scipy.stats import gaussian_kde
+
+        from omicverse.pl._stats_common import kde_curve
+
+        values = self._sample()
+        bandwidth = gaussian_kde(values).factor * np.std(values, ddof=1)
+        grid, _ = kde_curve(values, cut=2)
+        assert grid.min() == pytest.approx(values.min() - 2 * bandwidth)
+        assert grid.max() == pytest.approx(values.max() + 2 * bandwidth)
+
+    def test_the_old_range_fraction_would_have_been_much_wider(self):
+        """Guard on the magnitude, not just the formula."""
+        from omicverse.pl._stats_common import kde_curve
+
+        values = self._sample()
+        span = values.max() - values.min()
+        grid, _ = kde_curve(values, cut=2)
+        overshoot = values.min() - grid.min()
+        assert overshoot < 0.1 * span          # the fix
+        assert overshoot > 0                   # but cut still does something
+
+    def test_clip_bounds_the_support(self):
+        from omicverse.pl._stats_common import kde_curve
+
+        grid, _ = kde_curve(np.abs(self._sample()), cut=3, clip=(0, None))
+        assert grid.min() == 0.0
+
+    def test_density_integrates_to_one(self):
+        from omicverse.pl._stats_common import kde_curve
+
+        grid, density = kde_curve(self._sample(), cut=4)
+        assert trapezoid(density, grid) == pytest.approx(1.0, abs=1e-3)
+
+    def test_degenerate_sample_does_not_raise(self):
+        from omicverse.pl._stats_common import kde_curve
+
+        for values in (np.full(20, 3.0), np.array([1.0]), np.array([])):
+            grid, density = kde_curve(values)
+            assert np.all(density == 0.0)
+            assert grid.size == 200
+
+
+class TestViolinLook:
+    """The defaults that decide whether a violin reads or smudges."""
+
+    @staticmethod
+    def _bodies(ax):
+        """Only the violin polygons — a scatter's path is its marker shape."""
+        from matplotlib.collections import PolyCollection
+
+        return [c for c in ax.collections if isinstance(c, PolyCollection)]
+
+    @classmethod
+    def _widths(cls, ax):
+        return [float(np.ptp(c.get_paths()[0].vertices[:, 0]))
+                for c in cls._bodies(ax)]
+
+    def test_default_scale_gives_every_violin_the_same_width(self, cells):
+        """`ov.pl.violin` normalises by width; so should `violinplot`."""
+        widths = self._widths(violinplot(cells, "cell_type", "score"))
+        assert len(widths) == cells["cell_type"].nunique()
+        assert max(widths) - min(widths) < 0.05 * max(widths)
+
+    def test_violins_have_a_visible_outline(self, cells):
+        ax = violinplot(cells, "cell_type", "score")
+        bodies = self._bodies(ax)
+        assert bodies, "no filled violin found"
+        edge = np.asarray(bodies[0].get_edgecolor()).ravel()
+        # black, not white — an unoutlined fill is the 'smudge' failure mode
+        assert float(edge[0]) < 0.5
+
+    def test_area_scaling_is_still_available(self, cells):
+        widths = self._widths(violinplot(cells, "cell_type", "score",
+                                         scale="area"))
+        assert max(widths) - min(widths) > 1e-6
+
+    def test_stripplot_overlay_draws_every_point(self, cells):
+        plain = violinplot(cells, "cell_type", "score", stripplot=False)
+        n_plain = sum(c.get_offsets().shape[0] for c in plain.collections
+                      if c.get_offsets() is not None)
+        plt.close("all")
+        striped = violinplot(cells, "cell_type", "score", stripplot=True)
+        n_striped = sum(c.get_offsets().shape[0] for c in striped.collections
+                        if c.get_offsets() is not None)
+        assert n_striped - n_plain >= len(cells)
+
+    def test_cut_zero_keeps_a_bounded_quantity_in_range(self, cells):
+        positive = cells.assign(abs_score=cells["score"].abs())
+        ax = violinplot(positive, "cell_type", "abs_score", cut=0, inner=None)
+        lowest = min(float(c.get_paths()[0].vertices[:, 1].min())
+                     for c in self._bodies(ax))
+        assert lowest >= positive["abs_score"].min() - 1e-9
+
+    def test_clip_bounds_a_violin_too(self, cells):
+        positive = cells.assign(abs_score=cells["score"].abs())
+        ax = violinplot(positive, "cell_type", "abs_score", cut=3,
+                        clip=(0, None), inner=None)
+        lowest = min(float(c.get_paths()[0].vertices[:, 1].min())
+                     for c in self._bodies(ax))
+        assert lowest >= -1e-9
+
+
+class TestViolinMerge:
+    """`ov.pl.violin` absorbed `violinplot`; neither picture may change.
+
+    The requirement was that the existing violin keep working exactly as it
+    did, so the new options route to the kernel-density renderer and the
+    default path is left alone. These tests pin that boundary, because a
+    delegation that fires too eagerly would silently restyle every violin in
+    the package.
+    """
+
+    @staticmethod
+    def _adata(cells):
+        anndata = pytest.importorskip("anndata")
+        out = anndata.AnnData(np.zeros((len(cells), 1), dtype=np.float32),
+                              obs=cells.copy())
+        out.var_names = ["gene"]
+        return out
+
+    def test_default_path_does_not_delegate(self, cells, monkeypatch):
+        """No advanced option -> the matplotlib engine, untouched."""
+        from omicverse.pl import _categorical
+
+        called = []
+        monkeypatch.setattr(_categorical, "_violin_kde",
+                            lambda *a, **k: called.append(1))
+        from omicverse.pl import violin
+
+        violin(self._adata(cells), keys=["score"], groupby="cell_type",
+               show=False)
+        assert not called, "the default violin was rerouted to the KDE engine"
+
+    @pytest.mark.parametrize("option", [
+        {"hue": "condition"}, {"split": True}, {"cut": 0}, {"clip": (0, None)},
+        {"inner": "box"}, {"orient": "h"}, {"scale": "area"}, {"test": "auto"},
+    ])
+    def test_each_new_option_delegates(self, cells, monkeypatch, option):
+        from omicverse.pl import _categorical
+
+        called = []
+        monkeypatch.setattr(_categorical, "_violin_kde",
+                            lambda *a, **k: called.append(k) or "sentinel")
+        from omicverse.pl import violin
+
+        if "hue" in option or "split" in option:
+            option.setdefault("hue", "condition")
+        out = violin(self._adata(cells), keys="score", groupby="cell_type",
+                     **option)
+        assert called, f"{option} did not reach the KDE engine"
+        assert out == "sentinel"
+
+    def test_violin_now_takes_a_dataframe(self, cells):
+        from omicverse.pl import violin
+
+        ax = violin(cells, keys="score", groupby="cell_type", show=False)
+        assert ax is not None
+        assert cells["cell_type"].dtype == object  # caller's frame untouched
+        plt.close("all")
+
+    def test_absorbed_options_actually_draw(self, cells):
+        from omicverse.pl import violin
+
+        for option in ({"hue": "condition", "split": True},
+                       {"test": "auto"}, {"cut": 0}, {"inner": "stick"},
+                       {"orient": "h"}):
+            ax = violin(cells, keys="score", groupby="cell_type", **option)
+            assert ax.collections, option
+            plt.close("all")
+
+    def test_return_stats_gives_the_test_back(self, cells):
+        from omicverse.pl import violin
+
+        ax, stats = violin(cells, keys="score", groupby="cell_type",
+                           test="auto", return_stats=True)
+        assert stats["test"] is not None
+        plt.close("all")
+
+    def test_multi_key_with_an_advanced_option_is_refused(self, cells):
+        from omicverse.pl import violin
+
+        with pytest.raises(ValueError, match="one key at a time"):
+            violin(cells, keys=["score", "counts"], groupby="cell_type",
+                   split=True, hue="condition")
+
+    def test_violinplot_warns_and_forwards(self, cells):
+        from omicverse.pl import violinplot as legacy
+
+        with pytest.warns(DeprecationWarning, match="ov.pl.violin"):
+            ax = legacy(cells, "cell_type", "score")
+        assert ax is not None
+        plt.close("all")
+
+    def test_violinplot_keeps_its_own_defaults(self, cells):
+        """The shim must not inherit violin's defaults for these four.
+
+        Each one changes the figure: `violin` draws no inner box, draws the
+        raw points, pins fontsize=13 and uses the matplotlib engine — all the
+        opposite of what violinplot did.
+        """
+        from matplotlib.collections import PolyCollection
+
+        from omicverse.pl import violinplot as legacy
+
+        with pytest.warns(DeprecationWarning):
+            ax = legacy(cells, "cell_type", "score")
+        bodies = [c for c in ax.collections if isinstance(c, PolyCollection)]
+        points = sum(c.get_offsets().shape[0] for c in ax.collections
+                     if not isinstance(c, PolyCollection)
+                     and c.get_offsets() is not None)
+        assert bodies, "no violin drawn"
+        assert points < len(cells), "the strip overlay was inherited from violin"
+        assert ax.get_lines(), "the inner quartile box is missing"
+        plt.close("all")
+
+
+class TestViolinAnnDataPaths:
+    """The AnnData features must survive on the new code path too.
+
+    Delegating to the kernel-density renderer originally handed the AnnData
+    over by reference, and that renderer resolves a name through the plain
+    accessor, which knows nothing about `layer` or `use_raw`. So
+    ``violin(adata, keys='GENE', layer='counts', test='auto')`` silently
+    plotted ``.X``. The values are asserted here, not just that it ran.
+    """
+
+    X_VALUE, LAYER_VALUE, RAW_VALUE = 0.0, 100.0, 50.0
+
+    @classmethod
+    def _adata(cls):
+        anndata = pytest.importorskip("anndata")
+
+        rng = np.random.default_rng(0)
+        n = 200
+        obs = pd.DataFrame({"celltype": rng.choice(["a", "b"], n),
+                            "cond": rng.choice(["x", "y"], n)})
+        out = anndata.AnnData(np.full((n, 2), cls.X_VALUE, dtype=np.float32),
+                              obs=obs)
+        out.var_names = ["GENE0", "GENE1"]
+        out.layers["counts"] = np.full((n, 2), cls.LAYER_VALUE, dtype=np.float32)
+        raw = out.copy()
+        raw.X = np.full((n, 2), cls.RAW_VALUE, dtype=np.float32)
+        out.raw = raw
+        return out
+
+    @staticmethod
+    def _drawn_median(ax):
+        from matplotlib.collections import PolyCollection
+
+        bodies = [c for c in ax.collections if isinstance(c, PolyCollection)]
+        assert bodies, "nothing drawn"
+        return float(np.median(np.concatenate(
+            [c.get_paths()[0].vertices[:, 1] for c in bodies])))
+
+    @pytest.mark.parametrize("advanced", [{}, {"test": "auto"}])
+    def test_layer_is_honoured_on_both_paths(self, advanced):
+        from omicverse.pl import violin
+
+        ax = violin(self._adata(), keys="GENE0", groupby="celltype",
+                    layer="counts", use_raw=False, show=False, **advanced)
+        assert self._drawn_median(ax) == pytest.approx(self.LAYER_VALUE, abs=1)
+        plt.close("all")
+
+    @pytest.mark.parametrize("advanced", [{}, {"test": "auto"}])
+    def test_use_raw_is_honoured_on_both_paths(self, advanced):
+        from omicverse.pl import violin
+
+        ax = violin(self._adata(), keys="GENE0", groupby="celltype",
+                    use_raw=True, show=False, **advanced)
+        assert self._drawn_median(ax) == pytest.approx(self.RAW_VALUE, abs=1)
+        plt.close("all")
+
+    @pytest.mark.parametrize("advanced", [{}, {"test": "auto"}])
+    def test_use_raw_false_reads_x_on_both_paths(self, advanced):
+        from omicverse.pl import violin
+
+        ax = violin(self._adata(), keys="GENE0", groupby="celltype",
+                    use_raw=False, show=False, **advanced)
+        assert self._drawn_median(ax) == pytest.approx(self.X_VALUE, abs=1)
+        plt.close("all")
+
+    def test_an_ignored_layer_is_announced(self, capsys):
+        """`.raw` wins by default, which used to discard `layer=` in silence."""
+        from omicverse.pl import violin
+
+        violin(self._adata(), keys="GENE0", groupby="celltype",
+               layer="counts", show=False)
+        assert "layer='counts' is ignored" in capsys.readouterr().out
+        plt.close("all")
+
+    def test_gene_only_in_raw_still_resolves(self):
+        from omicverse.pl import violin
+
+        full = self._adata()
+        subset = full[:, ["GENE0"]].copy()
+        # `.raw = full` would store full.X, not full.raw.X — take the raw
+        # values explicitly so the assertion below can tell them apart
+        subset.raw = full.raw.to_adata()
+        ax = violin(subset, keys="GENE1", groupby="celltype", use_raw=True,
+                    show=False)
+        assert self._drawn_median(ax) == pytest.approx(self.RAW_VALUE, abs=1)
+        plt.close("all")
+
+    def test_hue_keeps_its_column_name_in_the_legend(self):
+        """Resolving hue to an array lost the label it was named after."""
+        from omicverse.pl import violin
+
+        ax = violin(self._adata(), keys="GENE0", groupby="celltype",
+                    hue="cond", split=True)
+        legend = ax.get_legend()
+        assert legend is not None and legend.get_title().get_text() == "cond"
+        plt.close("all")
+
+    def test_axis_labels_survive_the_delegation(self):
+        from omicverse.pl import violin
+
+        ax = violin(self._adata(), keys="GENE0", groupby="celltype",
+                    test="auto")
+        assert ax.get_xlabel() == "celltype"
+        assert ax.get_ylabel() == "GENE0"
+        plt.close("all")

@@ -1,6 +1,8 @@
 from ._scatterplot_backend import _embedding
 from .._registry import register_function
+from ._plotdata import get_values
 from ._plotdata import accepts_frame
+from ._plot_backend import style_axes
 import collections.abc as cabc
 from copy import copy
 from numbers import Integral
@@ -931,13 +933,7 @@ def bardotplot(adata,groupby,color,figsize=(8,3),return_values=False,
                    **scatter_kwargs)
 
 
-    plt.grid(False)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(True)
-    ax.spines['left'].set_visible(True)
-    ax.spines['left'].set_position(('outward', 10))
-    ax.spines['bottom'].set_position(('outward', 10))
+    style_axes(ax)
 
     plt.xticks(rotation=xticks_rotation,fontsize=fontsize)
     plt.xlabel(xlabel,fontsize=fontsize+1)
@@ -1115,13 +1111,7 @@ def single_group_boxplot(adata,
     yticks = ax.get_yticks()
     ax.set_title(title, fontsize=fontsize+1,)
     plt.ylabel(ylabel, fontsize=fontsize+1, )
-    plt.grid(False)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(True)
-    ax.spines['left'].set_visible(True)
-    ax.spines['left'].set_position(('outward', 10))
-    ax.spines['bottom'].set_position(('outward', 10))
+    style_axes(ax)
 
     if legend_plot == True:
         labels = list(plot_data.keys())
@@ -1581,13 +1571,7 @@ def violin_old(adata,keys=None,groupby=None,ax=None,figsize=(4,4),fontsize=13,
         fontsize=fontsize,
         **kwargs,
     )
-    plt.grid(False)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(True)
-    ax.spines['left'].set_visible(True)
-    ax.spines['left'].set_position(('outward', 10))
-    ax.spines['bottom'].set_position(('outward', 10))
+    style_axes(ax)
     if ticks_fontsize==None:
         ticks_fontsize=fontsize-1
 
@@ -1607,20 +1591,7 @@ def half_violin_boxplot(adata, keys, groupby, ax=None, figsize=(4,4), show=True,
     from scipy.sparse import issparse  
     
     # 获取 y 数据
-    y = None
-    if not adata.raw is None and keys in adata.raw.var_names:
-        y = adata.raw[:, keys].X
-    elif keys in adata.obs.columns:
-        y = adata.obs[keys].values
-    elif keys in adata.var_names:
-        y = adata[:, keys].X
-    else:
-        raise ValueError(f'{keys} not found in adata.raw.var_names, adata.var_names, or adata.obs.columns')
-    
-    if issparse(y):
-        y = y.toarray().reshape(-1)
-    else:
-        y = y.reshape(-1)
+    y = np.asarray(get_values(adata, keys), dtype=float).reshape(-1)
     
     # 获取 x 数据
     x = adata.obs[groupby].values.reshape(-1)

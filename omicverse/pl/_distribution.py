@@ -15,7 +15,9 @@ import numpy as np
 import pandas as pd
 
 from .._registry import register_function
-from ._stats_common import as_frame, default_palette, group_levels, resolve_columns
+from ._plot_backend import style_axes
+from ._stats_common import (as_frame, default_palette, font_size,
+                            group_levels, kde_curve, resolve_columns)
 
 __all__ = ["histplot", "kdeplot", "ridgeplot", "qqplot"]
 
@@ -30,18 +32,7 @@ def _values_and_groups(data, x, hue, order, hue_order, *, name="x"):
     return frame, hues, names, frame.attrs.get("n_dropped", 0)
 
 
-def _grid(values: np.ndarray, cut: float, gridsize: int) -> np.ndarray:
-    span = float(values.max() - values.min())
-    pad = cut * (span / 6 if span > 0 else 1.0)
-    return np.linspace(values.min() - pad, values.max() + pad, gridsize)
 
-
-def _density(values: np.ndarray, grid: np.ndarray, bw_method) -> np.ndarray:
-    from scipy.stats import gaussian_kde
-
-    if values.size < 2 or np.allclose(values, values[0]):
-        return np.zeros_like(grid)
-    return gaussian_kde(values, bw_method=bw_method)(grid)
 
 
 @register_function(
@@ -85,7 +76,7 @@ def histplot(data: Any = None,
              title: Optional[str] = None,
              legend: bool = True,
              legend_title: Optional[str] = None,
-             fontsize: float = 9,
+             fontsize: Optional[float] = None,
              return_stats: bool = False):
     r"""Histogram of one variable, optionally split by a factor.
 
@@ -191,27 +182,27 @@ def histplot(data: Any = None,
         if kde:
             mask = (np.ones(len(frame), dtype=bool) if hue_level is None
                     else frame["hue"].to_numpy() == hue_level)
-            grid = _grid(values[mask], 2.0, 200)
-            ax.plot(grid, _density(values[mask], grid, bw_method), color=colour,
-                    linewidth=1.5, zorder=3)
+            grid, curve = kde_curve(values[mask], cut=2.0, gridsize=200,
+                                    bw_method=bw_method)
+            ax.plot(grid, curve, color=colour, linewidth=1.5, zorder=3)
 
     label = xlabel if xlabel is not None else names.get("x", "")
     if log_scale:
         label = f"log10({label})" if label else "log10(value)"
-    ax.set_xlabel(label, fontsize=fontsize + 1)
+    ax.set_xlabel(label, fontsize=font_size(fontsize, "label"))
     default_y = {"count": "count", "density": "density",
                  "probability": "proportion", "percent": "percent"}[stat]
     if multiple == "fill":
         default_y = "fraction of bin"
     ax.set_ylabel(ylabel if ylabel is not None else default_y,
-                  fontsize=fontsize + 1)
+                  fontsize=font_size(fontsize, "label"))
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
     if legend and len(hues) > 1:
         ax.legend(title=legend_title or names.get("hue"), frameon=False,
-                  fontsize=fontsize)
+                  fontsize=font_size(fontsize))
 
     table = pd.DataFrame(matrix.T, index=pd.Index(centres, name="bin_centre"),
                          columns=[str(h) for h in hues])
@@ -265,7 +256,7 @@ def kdeplot(data: Any = None,
             title: Optional[str] = None,
             legend: bool = True,
             legend_title: Optional[str] = None,
-            fontsize: float = 9,
+            fontsize: Optional[float] = None,
             return_stats: bool = False):
     r"""Kernel density estimate in one or two dimensions.
 
@@ -315,9 +306,9 @@ def kdeplot(data: Any = None,
         ax.contour(mesh_x, mesh_y, density, levels=levels, cmap=cmap,
                    linewidths=linewidth * 0.6)
         ax.set_xlabel(xlabel if xlabel is not None else pair_names.get("x", ""),
-                      fontsize=fontsize + 1)
+                      fontsize=font_size(fontsize, "label"))
         ax.set_ylabel(ylabel if ylabel is not None else pair_names.get("y", ""),
-                      fontsize=fontsize + 1)
+                      fontsize=font_size(fontsize, "label"))
         curves["density"] = density
     else:
         colors = default_palette(max(len(hues), 1), palette)
@@ -328,8 +319,8 @@ def kdeplot(data: Any = None,
             sample = values[mask]
             if sample.size < 2:
                 continue
-            grid = _grid(sample, cut, gridsize)
-            density = _density(sample, grid, bw_method)
+            grid, density = kde_curve(sample, cut=cut, gridsize=gridsize,
+                                      bw_method=bw_method)
             if cumulative:
                 density = np.cumsum(density) * np.gradient(grid)
             ax.plot(grid, density, color=colour, linewidth=linewidth,
@@ -343,19 +334,19 @@ def kdeplot(data: Any = None,
                         clip_on=False)
             curves[hue_level] = (grid, density)
         ax.set_xlabel(xlabel if xlabel is not None else names.get("x", ""),
-                      fontsize=fontsize + 1)
+                      fontsize=font_size(fontsize, "label"))
         ax.set_ylabel(ylabel if ylabel is not None
                       else ("cumulative density" if cumulative else "density"),
-                      fontsize=fontsize + 1)
+                      fontsize=font_size(fontsize, "label"))
         ax.set_ylim(bottom=0)
         if legend and len(hues) > 1:
             ax.legend(title=legend_title or names.get("hue"), frameon=False,
-                      fontsize=fontsize)
+                      fontsize=font_size(fontsize))
 
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
     return (ax, curves) if return_stats else ax
 
 
@@ -398,7 +389,7 @@ def ridgeplot(data: Any = None,
               figsize: Optional[Tuple[float, float]] = None,
               xlabel: Optional[str] = None,
               title: Optional[str] = None,
-              fontsize: float = 9,
+              fontsize: Optional[float] = None,
               return_stats: bool = False):
     r"""Stacked, overlapping densities — one per group.
 
@@ -467,8 +458,8 @@ def ridgeplot(data: Any = None,
         if sample.size < 2:
             profiles.append(None)
             continue
-        grid = _grid(sample, cut, gridsize)
-        density = _density(sample, grid, bw_method)
+        grid, density = kde_curve(sample, cut=cut, gridsize=gridsize,
+                                  bw_method=bw_method)
         peak = max(peak, float(density.max()))
         profiles.append((grid, density, sample))
 
@@ -493,15 +484,16 @@ def ridgeplot(data: Any = None,
                         linewidth=0.8, zorder=len(levels) - index + 0.5)
 
     ax.set_yticks([(len(levels) - 1 - i) * step for i in range(len(levels))])
-    ax.set_yticklabels([str(level) for level in levels], fontsize=fontsize)
+    ax.set_yticklabels([str(level) for level in levels], fontsize=font_size(fontsize))
     ax.set_ylim(-0.2 * step, (len(levels) - 1) * step + height * 1.05)
     ax.set_xlabel(xlabel if xlabel is not None else names.get("x", ""),
-                  fontsize=fontsize + 1)
+                  fontsize=font_size(fontsize, "label"))
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
     ax.tick_params(axis="y", length=0)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top", "left"]].set_visible(False)
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax, spines=False)
+    ax.spines["bottom"].set_visible(True)
     return (ax, summary) if return_stats else ax
 
 
@@ -538,7 +530,7 @@ def qqplot(data: Any = None,
            xlabel: Optional[str] = None,
            ylabel: Optional[str] = None,
            title: Optional[str] = None,
-           fontsize: float = 9,
+           fontsize: Optional[float] = None,
            return_stats: bool = False):
     r"""Quantile-quantile plot.
 
@@ -656,16 +648,16 @@ def qqplot(data: Any = None,
     elif line is not None:
         raise ValueError("`line` must be 'quartile', '45', 'ols' or None.")
 
-    ax.set_xlabel(x_label, fontsize=fontsize + 1)
+    ax.set_xlabel(x_label, fontsize=font_size(fontsize, "label"))
     default_y = "observed $-\\log_{10}(P)$" if log else (
         f"sample quantiles ({names.get('x', '')})".strip())
     ax.set_ylabel(ylabel if ylabel is not None else default_y,
-                  fontsize=fontsize + 1)
+                  fontsize=font_size(fontsize, "label"))
     if "lambda_gc" in results:
         ax.text(0.03, 0.96, f"$\\lambda_{{GC}}$ = {results['lambda_gc']:.3f}",
-                transform=ax.transAxes, va="top", ha="left", fontsize=fontsize)
+                transform=ax.transAxes, va="top", ha="left", fontsize=font_size(fontsize))
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
     return (ax, results) if return_stats else ax

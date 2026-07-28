@@ -2,10 +2,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import scipy.stats as st
-from typing import Sequence, Union, Optional, Literal, List
+from typing import Sequence, Union, Optional, Literal, List, Tuple, Any
 from matplotlib.axes import Axes
 from collections import OrderedDict
 from .._registry import register_function
+from ._plotdata import accepts_frame
+from ._plotdata import get_values
 
 try:
     from anndata import AnnData
@@ -56,6 +58,7 @@ DensityNorm = Literal["area", "count", "width"]
     ],
     related=["pl.embedding", "pl.dotplot"]
 )
+@accepts_frame
 def violin(
     adata: AnnData,
     keys: Union[str, Sequence[str]],
@@ -99,6 +102,21 @@ def violin(
     fontsize=13,
     ticks_fontsize=None,
     verbose: bool = False,
+    hue: Optional[str] = None,
+    hue_order: Optional[Sequence[str]] = None,
+    split: bool = False,
+    cut: Optional[float] = None,
+    clip: Optional[Tuple[Optional[float], Optional[float]]] = None,
+    inner: Optional[str] = None,
+    orient: str = "v",
+    scale: Optional[str] = None,
+    width: float = 0.8,
+    palette: Any = None,
+    test: Optional[str] = None,
+    correction: Optional[str] = "holm",
+    annot_style: str = "star",
+    hide_ns: bool = False,
+    return_stats: bool = False,
     **kwds
 ) -> Union[Axes, None]:
     r"""
@@ -149,6 +167,58 @@ def violin(
         ax: matplotlib.axes.Axes | None. A matplotlib axes object if `ax` is `None` else `None`.
     """
     
+    # ------------------------------------------------------------------
+    # Options the matplotlib engine below cannot express — a mirrored
+    # (split) violin, a density clipped at a hard bound, a horizontal
+    # layout, per-observation inner marks, or significance brackets. Only
+    # those route to the kernel-density renderer; with none of them the
+    # original code path runs untouched, so the default figure is
+    # unchanged to the pixel.
+    # ------------------------------------------------------------------
+    _advanced = (hue is not None or split or cut is not None or clip is not None
+                 or inner is not None or orient != "v" or scale is not None
+                 or test is not None or return_stats)
+    if _advanced:
+        from ._categorical import _violin_kde
+
+        if isinstance(keys, (list, tuple)):
+            if len(keys) != 1:
+                raise ValueError(
+                    "hue / split / cut / clip / inner / orient / test handle "
+                    f"one key at a time, got {len(keys)}. Call violin() once "
+                    "per key, or drop those options for the multi-key layout."
+                )
+            _key = keys[0]
+        else:
+            _key = keys
+        # Resolve the values here rather than handing the container over:
+        # _violin_kde reads a name through the plain accessor, which knows
+        # nothing about `layer` or `use_raw`, so passing the AnnData through
+        # silently plotted .X whatever the caller asked for.
+        from ._plotdata import get_values as _get_values
+
+        _use_raw = use_raw
+        if _use_raw is None:
+            _use_raw = getattr(adata, "raw", None) is not None and layer is None
+        _y = _get_values(adata, _key,
+                         layer=None if _use_raw else layer,
+                         use_raw=True if _use_raw else None)
+        _x = _get_values(adata, groupby) if groupby is not None else None
+        _hue = _get_values(adata, hue) if hue is not None else None
+        return _violin_kde(
+            None, x=_x, y=_y, hue=_hue, hue_order=hue_order,
+            xlabel=groupby or "", ylabel=_key,
+            legend_title=hue,
+            order=order, split=split, inner=inner,
+            cut=2.0 if cut is None else cut, clip=clip,
+            scale="width" if scale is None else scale, orient=orient,
+            width=width, palette=palette if palette is not None else custom_colors,
+            ax=ax, figsize=figsize, test=test, correction=correction,
+            annot_style=annot_style, hide_ns=hide_ns,
+            stripplot=stripplot, rotation=rotation or 0,
+            fontsize=fontsize, return_stats=return_stats, **kwds,
+        )
+
     # Handle AnnData availability
     if not ANNDATA_AVAILABLE:
         raise ImportError("AnnData is required for this function. Install with: pip install anndata")
@@ -477,6 +547,14 @@ def _extract_data_from_adata(adata, keys, groupby, layer, use_raw):
     # Default behavior: use raw if it exists and use_raw is not explicitly False
     if use_raw is None:
         use_raw = hasattr(adata, 'raw') and adata.raw is not None
+        if use_raw and layer is not None:
+            # Long-standing behaviour is that .raw wins, which quietly threw
+            # away an explicit `layer=`. Keep the behaviour, lose the silence.
+            print(
+                f"violin: `.raw` is present so it takes precedence and "
+                f"layer={layer!r} is ignored. Pass use_raw=False to read the "
+                f"layer instead."
+            )
 
     data_dict = {}
 
@@ -493,29 +571,14 @@ def _extract_data_from_adata(adata, keys, groupby, layer, use_raw):
         if key in adata.obs.columns:
             # Key is in observations
             data_dict[key] = adata.obs[key]
-        elif key in adata.var_names:
-            # Key is a gene in current var_names
-            if use_raw and _has_raw and key in adata.raw.var_names:
-                gene_idx = list(adata.raw.var_names).index(key)
-                data_dict[key] = adata.raw.X[:, gene_idx]
-            elif layer is not None and layer in adata.layers:
-                gene_idx = list(adata.var_names).index(key)
-                data_dict[key] = adata.layers[layer][:, gene_idx]
-            else:
-                gene_idx = list(adata.var_names).index(key)
-                data_dict[key] = adata.X[:, gene_idx]
-
-            # Handle sparse matrices and ensure 1-D
-            if hasattr(data_dict[key], 'toarray'):
-                data_dict[key] = data_dict[key].toarray()
-            data_dict[key] = np.asarray(data_dict[key]).ravel()
-        elif use_raw and _has_raw and key in adata.raw.var_names:
-            # Key is NOT in current var_names but IS in raw (e.g. after HVG subsetting)
-            gene_idx = list(adata.raw.var_names).index(key)
-            data_dict[key] = adata.raw.X[:, gene_idx]
-            if hasattr(data_dict[key], 'toarray'):
-                data_dict[key] = data_dict[key].toarray()
-            data_dict[key] = np.asarray(data_dict[key]).ravel()
+        elif key in adata.var_names or (_has_raw and key in adata.raw.var_names):
+            # A gene: ov.pl.get_values applies the layer / raw rules, densifies
+            # a sparse column, and rescues names left only in .raw by HVG
+            # subsetting
+            data_dict[key] = get_values(
+                adata, key, layer=layer if not use_raw else None,
+                use_raw=True if use_raw and _has_raw else None,
+            )
         else:
             available = "adata.obs, adata.var_names"
             if _has_raw:

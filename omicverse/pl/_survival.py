@@ -26,8 +26,9 @@ import numpy as np
 import pandas as pd
 
 from .._registry import register_function
-from ._stats_common import (as_frame, default_palette, group_levels,
-                            resolve_columns)
+from ._plot_backend import style_axes
+from ._stats_common import (as_frame, default_palette, font_size,
+                            group_levels, resolve_columns)
 
 __all__ = [
     "kaplan_meier",
@@ -55,6 +56,20 @@ def _event_table(time: np.ndarray, indicator: np.ndarray) -> Dict[str, np.ndarra
             "n_censor": n_censor}
 
 
+@register_function(
+    aliases=["KM估计", "kaplan_meier", "生存估计", "product_limit", "乘积极限估计"],
+    category="pl",
+    description=(
+        "Kaplan-Meier product-limit estimator with a log-log confidence band, median and its Brookmeyer-Crowley interval — numbers only, no plot"
+    ),
+    examples=[
+        'fit = ov.pl.kaplan_meier(df["months"], df["dead"])',
+        'print(fit["median"], fit["median_ci"])',
+        '# the curve itself, for a custom figure',
+        'ax.step(fit["timeline"], fit["survival"], where="post")',
+    ],
+    related=["pl.survival", "pl.logrank_test", "pl.aalen_johansen"],
+)
 def kaplan_meier(time: Sequence[float],
                  event: Sequence[Any],
                  *,
@@ -165,6 +180,20 @@ def _at_risk(time: np.ndarray, query: np.ndarray) -> np.ndarray:
     return np.array([(time >= q).sum() for q in query], dtype=int)
 
 
+@register_function(
+    aliases=["log-rank检验", "logrank_test", "生存差异检验", "mantel_cox", "风险比"],
+    category="pl",
+    description=(
+        "Multivariate log-rank (Mantel-Cox) test with the Mantel-Haenszel hazard ratio for two groups; `groups=` fixes which level is the reference"
+    ),
+    examples=[
+        'res = ov.pl.logrank_test(df["months"], df["dead"], df["arm"])',
+        'print(res["pvalue"], res["hazard_ratio"])',
+        '# choose the reference explicitly',
+        'res = ov.pl.logrank_test(t, e, g, groups=["advanced", "early"])',
+    ],
+    related=["pl.survival", "pl.kaplan_meier", "pl.grays_test"],
+)
 def logrank_test(time: Sequence[float],
                  event: Sequence[Any],
                  group: Sequence[Any],
@@ -259,6 +288,20 @@ def logrank_test(time: Sequence[float],
     return out
 
 
+@register_function(
+    aliases=["AJ估计", "aalen_johansen", "累积发病率估计", "竞争风险估计", "CIF"],
+    category="pl",
+    description=(
+        "Aalen-Johansen cumulative incidence for one cause under competing risks, with the delta-method variance — the correct alternative to 1 - KM"
+    ),
+    examples=[
+        'fit = ov.pl.aalen_johansen(df["months"], df["cause"], cause=1)',
+        'print(fit["cif"][-1])',
+        '# how wrong the naive estimator would have been',
+        'km = ov.pl.kaplan_meier(df["months"], df["cause"] == 1)',
+    ],
+    related=["pl.cumulative_incidence", "pl.grays_test", "pl.kaplan_meier"],
+)
 def aalen_johansen(time: Sequence[float],
                    event: Sequence[Any],
                    cause: Any = 1,
@@ -379,6 +422,20 @@ def _subdistribution_curves(t: np.ndarray, codes: np.ndarray, cause: Any):
     return times, surv, cif
 
 
+@register_function(
+    aliases=["Gray检验", "grays_test", "gray_test", "竞争风险检验", "次分布检验"],
+    category="pl",
+    description=(
+        "Gray's test for equality of cumulative incidence functions — the test that matches what a competing-risk plot shows, unlike a plain log-rank"
+    ),
+    examples=[
+        'res = ov.pl.grays_test(df["months"], df["cause"], df["arm"], cause=1)',
+        'print(res["pvalue"])',
+        '# contrast with the cause-specific log-rank, a different question',
+        'ov.pl.logrank_test(df["months"], df["cause"] == 1, df["arm"])',
+    ],
+    related=["pl.cumulative_incidence", "pl.aalen_johansen", "pl.logrank_test"],
+)
 def grays_test(time: Sequence[float],
                event: Sequence[Any],
                group: Sequence[Any],
@@ -531,11 +588,11 @@ def _draw_risk_table(ax_risk, times, labels, counts, colors, fontsize,
     ax_risk.set_ylim(-0.5, n - 0.5)
     ax_risk.invert_yaxis()
     ax_risk.set_yticks(range(n))
-    ax_risk.set_yticklabels(labels, fontsize=fontsize)
+    ax_risk.set_yticklabels(labels, fontsize=font_size(fontsize))
     for tick, color in zip(ax_risk.get_yticklabels(), colors):
         tick.set_color(color)
     ax_risk.set_xticks(times)
-    ax_risk.set_xticklabels([f"{v:g}" for v in times], fontsize=fontsize + 0.5)
+    ax_risk.set_xticklabels([f"{v:g}" for v in times], fontsize=font_size(fontsize) + 0.5)
     ax_risk.tick_params(axis="x", length=0, labelbottom=True)
     ax_risk.tick_params(axis="y", length=0)
     for spine in ax_risk.spines.values():
@@ -546,11 +603,11 @@ def _draw_risk_table(ax_risk, times, labels, counts, colors, fontsize,
             rel = (x - xlim[0]) / span
             ha = "left" if rel < 0.02 else ("right" if rel > 0.98 else "center")
             ax_risk.text(x, row, f"{int(value)}", ha=ha, va="center",
-                         fontsize=fontsize)
+                         fontsize=font_size(fontsize))
     ax_risk.set_ylabel("")
     if xlabel:
-        ax_risk.set_xlabel(xlabel, fontsize=fontsize + 1.5)
-    ax_risk.set_title("Number at risk", fontsize=fontsize, loc="left", pad=3)
+        ax_risk.set_xlabel(xlabel, fontsize=font_size(fontsize, "label", 0.5))
+    ax_risk.set_title("Number at risk", fontsize=font_size(fontsize), loc="left", pad=3)
 
 
 def _step_ci(ax, x, lo, hi, color, alpha):
@@ -564,7 +621,7 @@ def _step_ci(ax, x, lo, hi, color, alpha):
 
 
 @register_function(
-    aliases=["生存曲线", "survival", "kaplan_meier", "KM曲线", "km_plot", "生存分析图"],
+    aliases=["生存曲线", "survival", "KM曲线", "km_plot", "生存分析图", "生存曲线图"],
     category="pl",
     description=(
         "Kaplan-Meier survival curves with confidence band, censoring marks, "
@@ -609,7 +666,7 @@ def survival(data: Any = None,
              ylim: Optional[Tuple[float, float]] = None,
              legend: bool = True,
              legend_loc: str = "best",
-             fontsize: float = 9,
+             fontsize: Optional[float] = None,
              linewidth: float = 1.6,
              return_stats: bool = False):
     r"""Plot Kaplan-Meier survival curves.
@@ -722,7 +779,7 @@ def survival(data: Any = None,
             )
     if annotation:
         ax.text(0.98, 0.98, "\n".join(annotation), transform=ax.transAxes,
-                ha="right", va="top", fontsize=fontsize,
+                ha="right", va="top", fontsize=font_size(fontsize),
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                           edgecolor="0.8", alpha=0.85))
 
@@ -733,21 +790,21 @@ def survival(data: Any = None,
         ax.set_yticklabels([f"{v:.0f}" for v in np.linspace(0, 100, 6)])
     time_label = xlabel if xlabel is not None else names.get("time", "Time")
     if ax_risk is None:
-        ax.set_xlabel(time_label, fontsize=fontsize + 1)
+        ax.set_xlabel(time_label, fontsize=font_size(fontsize, "label"))
     else:
         # the risk table below carries the time axis instead
         ax.tick_params(axis="x", labelbottom=False)
     ax.set_ylabel(
         ylabel if ylabel is not None
         else ("Survival probability (%)" if percent else "Survival probability"),
-        fontsize=fontsize + 1,
+        fontsize=font_size(fontsize, "label"),
     )
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
     if legend and "group" in frame:
-        ax.legend(loc=legend_loc, frameon=False, fontsize=fontsize)
+        ax.legend(loc=legend_loc, frameon=False, fontsize=font_size(fontsize))
 
     if ax_risk is not None:
         ticks = (np.asarray(risk_table_times, dtype=float)
@@ -756,7 +813,7 @@ def survival(data: Any = None,
                                   if ax.get_xlim()[0] <= v <= ax.get_xlim()[1]]))
         counts = [_at_risk(t[g == level], ticks) for level in levels]
         _draw_risk_table(ax_risk, ticks, [str(lv) for lv in levels], counts,
-                         colors, fontsize - 0.5, ax.get_xlim(), time_label)
+                         colors, font_size(fontsize, "tick", -0.5), ax.get_xlim(), time_label)
         ax_risk.set_xlim(ax.get_xlim())
 
     return (ax, stats) if return_stats else ax
@@ -764,7 +821,7 @@ def survival(data: Any = None,
 
 @register_function(
     aliases=["累积发病率", "cumulative_incidence", "竞争风险", "competing_risks",
-             "CIF", "aalen_johansen"],
+             "累积发生率曲线"],
     category="pl",
     description=(
         "Aalen-Johansen cumulative incidence curves under competing risks, "
@@ -809,7 +866,7 @@ def cumulative_incidence(data: Any = None,
                          ylim: Optional[Tuple[float, float]] = None,
                          legend: bool = True,
                          legend_loc: str = "best",
-                         fontsize: float = 9,
+                         fontsize: Optional[float] = None,
                          linewidth: float = 1.6,
                          return_stats: bool = False):
     r"""Plot cumulative incidence functions under competing risks.
@@ -897,7 +954,7 @@ def cumulative_incidence(data: Any = None,
         result = grays_test(t, e, g, causes[0], groups=levels)
         stats.update(result)
         ax.text(0.02, 0.98, f"Gray's test {_format_p(result['pvalue'])}",
-                transform=ax.transAxes, ha="left", va="top", fontsize=fontsize,
+                transform=ax.transAxes, ha="left", va="top", fontsize=font_size(fontsize),
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                           edgecolor="0.8", alpha=0.85))
 
@@ -912,20 +969,20 @@ def cumulative_incidence(data: Any = None,
         ax.set_yticklabels([f"{v * 100:.0f}" for v in ticks])
     time_label = xlabel if xlabel is not None else names.get("time", "Time")
     if ax_risk is None:
-        ax.set_xlabel(time_label, fontsize=fontsize + 1)
+        ax.set_xlabel(time_label, fontsize=font_size(fontsize, "label"))
     else:
         ax.tick_params(axis="x", labelbottom=False)
     ax.set_ylabel(
         ylabel if ylabel is not None
         else ("Cumulative incidence (%)" if percent else "Cumulative incidence"),
-        fontsize=fontsize + 1,
+        fontsize=font_size(fontsize, "label"),
     )
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
     if legend:
-        ax.legend(loc=legend_loc, frameon=False, fontsize=fontsize)
+        ax.legend(loc=legend_loc, frameon=False, fontsize=font_size(fontsize))
 
     if ax_risk is not None:
         ticks = (np.asarray(risk_table_times, dtype=float)
@@ -934,7 +991,7 @@ def cumulative_incidence(data: Any = None,
                                   if ax.get_xlim()[0] <= v <= ax.get_xlim()[1]]))
         counts = [_at_risk(t[mask], ticks) for _, mask, _, _ in series]
         _draw_risk_table(ax_risk, ticks, [lab for *_, lab in series], counts,
-                         colors, fontsize - 0.5, ax.get_xlim(), time_label)
+                         colors, font_size(fontsize, "tick", -0.5), ax.get_xlim(), time_label)
         ax_risk.set_xlim(ax.get_xlim())
 
     return (ax, stats) if return_stats else ax

@@ -21,7 +21,8 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-__all__ = ["as_frame", "default_palette", "group_levels", "resolve_columns"]
+__all__ = ["as_frame", "default_palette", "font_size", "font_sizes",
+           "group_levels", "kde_curve", "resolve_columns"]
 
 
 def as_frame(data: Any) -> Optional[pd.DataFrame]:
@@ -187,3 +188,82 @@ def default_palette(n: int, palette: Any = None) -> list:
     if len(base) < n:
         base = (base * (n // len(base) + 1))[:n]
     return base[:n]
+
+
+def kde_curve(values, *, cut: float = 2.0, gridsize: int = 200,
+              bw_method: Any = None, clip=None):
+    """Gaussian KDE of ``values`` on a grid extended by ``cut`` *bandwidths*.
+
+    ``cut`` means what it means in seaborn and R: how far past the extreme
+    observations the density is drawn, measured in kernel bandwidths. An
+    earlier version of this code measured it as a fraction of the data range
+    instead, which put a long thin tail on every violin — visually the whole
+    difference between these plots and the ones in ``ov.pl.violin``.
+
+    Returns ``(grid, density)``; a degenerate sample (fewer than two distinct
+    values) yields a flat zero density rather than raising.
+    """
+    import numpy as _np
+
+    values = _np.asarray(values, dtype=float)
+    values = values[_np.isfinite(values)]
+    if values.size < 2 or _np.allclose(values, values[0]):
+        centre = float(values[0]) if values.size else 0.0
+        grid = _np.linspace(centre - 1.0, centre + 1.0, gridsize)
+        return grid, _np.zeros_like(grid)
+
+    from scipy.stats import gaussian_kde
+
+    kernel = gaussian_kde(values, bw_method=bw_method)
+    bandwidth = float(kernel.factor * _np.std(values, ddof=1))
+    low = values.min() - cut * bandwidth
+    high = values.max() + cut * bandwidth
+    if clip is not None:
+        low = max(low, clip[0]) if clip[0] is not None else low
+        high = min(high, clip[1]) if clip[1] is not None else high
+    grid = _np.linspace(low, high, gridsize)
+    return grid, kernel(grid)
+
+
+def font_sizes(fontsize=None) -> Dict[str, float]:
+    """Label / tick / title / legend point sizes.
+
+    With ``fontsize=None`` — the default everywhere in ``ov.pl`` — the sizes
+    come from the rcParams that :func:`~omicverse.pl.plot_set` configured, so
+    a figure follows whatever the user set globally instead of a second,
+    hard-coded scale living inside the plotting functions.
+
+    An explicit ``fontsize`` overrides all four, keeping the tick size and
+    deriving the rest, which is what a caller passing ``fontsize=6`` for a
+    small panel means.
+    """
+    import matplotlib.pyplot as _plt
+    from matplotlib.font_manager import FontProperties as _FontProperties
+
+    def _points(value) -> float:
+        return float(_FontProperties(size=value).get_size_in_points())
+
+    if fontsize is None:
+        rc = _plt.rcParams
+        return {
+            "label": _points(rc["axes.labelsize"]),
+            "tick": _points(rc["xtick.labelsize"]),
+            "title": _points(rc["axes.titlesize"]),
+            "legend": _points(rc["legend.fontsize"]),
+        }
+    size = float(fontsize)
+    return {"label": size + 1, "tick": size, "title": size + 2,
+            "legend": size}
+
+
+def font_size(fontsize=None, role: str = "tick", delta: float = 0.0) -> float:
+    """One size from :func:`font_sizes`, optionally nudged by ``delta``.
+
+    ``role`` is ``'tick'`` (default), ``'label'``, ``'title'`` or ``'legend'``.
+    """
+    sizes = font_sizes(fontsize)
+    if role not in sizes:
+        raise ValueError(
+            f"`role` must be one of {sorted(sizes)}, got {role!r}."
+        )
+    return max(sizes[role] + delta, 1.0)

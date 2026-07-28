@@ -24,7 +24,9 @@ import numpy as np
 import pandas as pd
 
 from .._registry import register_function
-from ._stats_common import as_frame, default_palette, group_levels, resolve_columns
+from ._plot_backend import style_axes
+from ._stats_common import (as_frame, default_palette, font_size,
+                            group_levels, kde_curve, resolve_columns)
 
 __all__ = [
     "barplot", "stripplot", "violinplot", "stackplot", "lollipopplot",
@@ -67,24 +69,24 @@ def _finish(ax, *, levels, names, xlabel, ylabel, title, fontsize, orient,
     if categorical_axis:
         if orient == "v":
             ax.set_xticks(range(len(levels)))
-            ax.set_xticklabels(labels, fontsize=fontsize,
+            ax.set_xticklabels(labels, fontsize=font_size(fontsize),
                                rotation=rotation,
                                ha="right" if rotation else "center")
         else:
             ax.set_yticks(range(len(levels)))
-            ax.set_yticklabels(labels, fontsize=fontsize)
+            ax.set_yticklabels(labels, fontsize=font_size(fontsize))
     cat_label = xlabel if xlabel is not None else names.get("x", "")
     val_label = ylabel if ylabel is not None else names.get("y", "")
     if orient == "v":
-        ax.set_xlabel(cat_label, fontsize=fontsize + 1)
-        ax.set_ylabel(val_label, fontsize=fontsize + 1)
+        ax.set_xlabel(cat_label, fontsize=font_size(fontsize, "label"))
+        ax.set_ylabel(val_label, fontsize=font_size(fontsize, "label"))
     else:
-        ax.set_ylabel(cat_label, fontsize=fontsize + 1)
-        ax.set_xlabel(val_label, fontsize=fontsize + 1)
+        ax.set_ylabel(cat_label, fontsize=font_size(fontsize, "label"))
+        ax.set_xlabel(val_label, fontsize=font_size(fontsize, "label"))
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
 
 
 def _hue_legend(ax, hues, colors, title, fontsize, show):
@@ -94,8 +96,8 @@ def _hue_legend(ax, hues, colors, title, fontsize, show):
 
     ax.legend(handles=[Patch(facecolor=c, label=str(h))
                        for h, c in zip(hues, colors)],
-              title=title, frameon=False, fontsize=fontsize,
-              title_fontsize=fontsize)
+              title=title, frameon=False, fontsize=font_size(fontsize),
+              title_fontsize=font_size(fontsize))
 
 
 def _maybe_annotate(ax, frame, levels, test, correction, style, hide_ns,
@@ -109,7 +111,7 @@ def _maybe_annotate(ax, frame, levels, test, correction, style, hide_ns,
         ax, value=frame["y"].to_numpy(dtype=float),
         group=frame["x"].to_numpy(), order=levels, test=test,
         correction=correction, style=style, hide_ns=hide_ns, orient=orient,
-        fontsize=fontsize, return_stats=True,
+        fontsize=font_size(fontsize), return_stats=True,
     )
     return results
 
@@ -214,7 +216,7 @@ def barplot(data: Any = None,
             legend: bool = True,
             legend_title: Optional[str] = None,
             rotation: float = 0,
-            fontsize: float = 9,
+            fontsize: Optional[float] = None,
             random_state: int = 0,
             return_stats: bool = False):
     r"""Bars of a per-category summary, with error bars.
@@ -321,7 +323,7 @@ def barplot(data: Any = None,
 
 
 @register_function(
-    aliases=["散点分布图", "stripplot", "抖动散点", "jitter_plot", "点图"],
+    aliases=["stripplot", "散点分布图", "抖动散点", "jitter_plot", "逐点分布图"],
     category="pl",
     description=(
         "Strip plot: every observation as a jittered point per category, "
@@ -364,7 +366,7 @@ def stripplot(data: Any = None,
               legend: bool = True,
               legend_title: Optional[str] = None,
               rotation: float = 0,
-              fontsize: float = 9,
+              fontsize: Optional[float] = None,
               random_state: int = 0,
               return_stats: bool = False):
     r"""Every observation as a jittered point.
@@ -440,33 +442,10 @@ def stripplot(data: Any = None,
     return (ax, {"test": results}) if return_stats else ax
 
 
-def _kde_profile(values: np.ndarray, grid: np.ndarray, bw_method):
-    from scipy.stats import gaussian_kde
-
-    if values.size < 2 or np.allclose(values, values[0]):
-        return np.zeros_like(grid)
-    return gaussian_kde(values, bw_method=bw_method)(grid)
 
 
-@register_function(
-    aliases=["小提琴图", "violinplot", "violin_plot", "分布小提琴"],
-    category="pl",
-    description=(
-        "Violin plot from a table (no AnnData): kernel density per category, "
-        "optional split by a two-level factor, inner box/points, and brackets"
-    ),
-    examples=[
-        "ax = ov.pl.violinplot(df, 'cell_type', 'score')",
-        "# Two conditions mirrored in one violin",
-        "ax = ov.pl.violinplot(df, 'cell_type', 'score', hue='condition',",
-        "                      split=True)",
-        "# With a Kruskal-Wallis omnibus and corrected pairwise brackets",
-        "ax, res = ov.pl.violinplot(df, 'arm', 'value', test='auto',",
-        "                           return_stats=True)",
-    ],
-    related=["pl.violin", "pl.stripplot", "pl.barplot", "pl.compare_groups"],
-)
-def violinplot(data: Any = None,
+
+def _violin_kde(data: Any = None,
                x: Any = None,
                y: Any = None,
                *,
@@ -476,14 +455,19 @@ def violinplot(data: Any = None,
                split: bool = False,
                inner: Optional[str] = "box",
                cut: float = 2.0,
+               clip: Optional[Tuple[Optional[float], Optional[float]]] = None,
                bw_method: Any = None,
                gridsize: int = 200,
-               scale: str = "area",
+               scale: str = "width",
+               stripplot: bool = False,
+               strip_size: float = 2.0,
+               strip_alpha: float = 0.5,
                orient: str = "v",
                width: float = 0.8,
                palette=None,
                alpha: float = 0.9,
-               linewidth: float = 0.8,
+               linewidth: float = 1.1,
+               edgecolor: str = "black",
                ax=None,
                figsize: Optional[Tuple[float, float]] = None,
                test: Optional[str] = None,
@@ -496,7 +480,7 @@ def violinplot(data: Any = None,
                legend: bool = True,
                legend_title: Optional[str] = None,
                rotation: float = 0,
-               fontsize: float = 9,
+               fontsize: Optional[float] = None,
                random_state: int = 0,
                return_stats: bool = False):
     r"""Kernel-density violins per category.
@@ -511,11 +495,23 @@ def violinplot(data: Any = None,
         observations), ``'stick'`` (a tick per observation), or ``None``.
     cut
         How far past the extreme observations the density is drawn, in
-        bandwidths. ``cut=0`` clips at the data range, which is what you want
-        for a bounded quantity like a proportion.
+        **kernel bandwidths** — the same meaning as in seaborn and R.
+        ``cut=0`` stops at the data range, which is what a bounded quantity
+        like a proportion needs.
+    clip
+        Hard ``(low, high)`` limits on the density support, e.g. ``(0, None)``
+        for a non-negative quantity. Either end may be ``None``.
     scale
-        ``'area'`` (equal area, default), ``'width'`` (equal maximum width) or
+        ``'width'`` (equal maximum width, the default and what
+        :func:`~omicverse.pl.violin` uses), ``'area'`` (equal area) or
         ``'count'`` (width proportional to n).
+    stripplot
+        Overlay the raw observations. Off by default here because this
+        function is routinely handed a hundred thousand rows; turn it on for
+        the small-n plots where a violin alone hides the sample size.
+    edgecolor, linewidth
+        Outline of each violin. A visible outline is most of what separates a
+        readable violin from a coloured smudge.
 
     Returns
     -------
@@ -547,10 +543,8 @@ def violinplot(data: Any = None,
             values = frame.loc[mask, "y"].to_numpy(dtype=float)
             if values.size == 0:
                 continue
-            span = values.max() - values.min()
-            pad = cut * (span / 6 if span > 0 else 1.0)
-            grid = np.linspace(values.min() - pad, values.max() + pad, gridsize)
-            density = _kde_profile(values, grid, bw_method)
+            grid, density = kde_curve(values, cut=cut, gridsize=gridsize,
+                                      bw_method=bw_method, clip=clip)
             profiles.append({"x": level, "hue": hue_level, "n": values.size,
                              "grid": grid, "density": density,
                              "position": x_index + offsets[h_index],
@@ -583,13 +577,23 @@ def violinplot(data: Any = None,
         if orient == "v":
             ax.fill_betweenx(grid, edge_lo, edge_hi, color=profile["color"],
                              alpha=alpha, linewidth=linewidth,
-                             edgecolor="white", zorder=2)
+                             edgecolor=edgecolor, zorder=2)
         else:
             ax.fill_between(grid, edge_lo, edge_hi, color=profile["color"],
                             alpha=alpha, linewidth=linewidth,
-                            edgecolor="white", zorder=2)
+                            edgecolor=edgecolor, zorder=2)
 
         values = profile["values"]
+        if stripplot:
+            noise = rng.uniform(-slot * 0.10, slot * 0.10, values.size)
+            if orient == "v":
+                ax.scatter(position + noise, values, s=strip_size,
+                           color="0.15", alpha=strip_alpha, linewidths=0,
+                           zorder=2.5)
+            else:
+                ax.scatter(values, position + noise, s=strip_size,
+                           color="0.15", alpha=strip_alpha, linewidths=0,
+                           zorder=2.5)
         centre = position
         if split:
             centre = position + (-slot / 6 if profile["half"] == 0 else slot / 6)
@@ -652,7 +656,8 @@ def violinplot(data: Any = None,
 
 
 @register_function(
-    aliases=["堆叠柱状图", "stackplot", "stacked_bar", "组成图", "比例图"],
+    aliases=["stackplot", "堆叠柱状图", "stacked_bar", "表格组成图",
+             "非adata堆叠图"],
     category="pl",
     description=(
         "Stacked bars of composition per category — counts or proportions — "
@@ -691,7 +696,7 @@ def stackplot(data: Any = None,
               legend_title: Optional[str] = None,
               legend_out: bool = True,
               rotation: float = 45,
-              fontsize: float = 9,
+              fontsize: Optional[float] = None,
               return_stats: bool = False):
     r"""Stacked composition bars.
 
@@ -768,7 +773,7 @@ def stackplot(data: Any = None,
                             fontsize=fontsize)
         else:
             ax.legend(title=legend_title or names.get("hue"), frameon=False,
-                      fontsize=fontsize)
+                      fontsize=font_size(fontsize))
     return (ax, matrix) if return_stats else ax
 
 
@@ -811,7 +816,7 @@ def lollipopplot(data: Any = None,
                  ylabel: Optional[str] = None,
                  title: Optional[str] = None,
                  colorbar_label: Optional[str] = None,
-                 fontsize: float = 9,
+                 fontsize: Optional[float] = None,
                  return_stats: bool = False):
     r"""Stem-and-dot chart of one value per label.
 
@@ -888,8 +893,8 @@ def lollipopplot(data: Any = None,
             rotation=0 if orient == "h" else 45)
     if "c" in table:
         bar = ax.figure.colorbar(points, ax=ax, fraction=0.035, pad=0.03)
-        bar.set_label(colorbar_label or "", fontsize=fontsize)
-        bar.ax.tick_params(labelsize=fontsize - 1)
+        bar.set_label(colorbar_label or "", fontsize=font_size(fontsize))
+        bar.ax.tick_params(labelsize=font_size(fontsize) - 1)
     ax.spines["left" if orient == "h" else "bottom"].set_visible(orient != "h")
     table = table.rename(columns={"x": "label", "y": "value", "c": "color_by"})
     return (ax, table) if return_stats else ax
@@ -915,7 +920,7 @@ def _pie(values, labels, colors, *, hole, ax, start_angle, percent, counts,
         explode=explode, labeldistance=label_distance,
         wedgeprops=dict(width=1.0 - hole, edgecolor=edgecolor,
                         linewidth=linewidth),
-        textprops=dict(fontsize=fontsize),
+        textprops=dict(fontsize=font_size(fontsize)),
     )
     if percent:
         for wedge, value in zip(wedges, values):
@@ -923,7 +928,7 @@ def _pie(values, labels, colors, *, hole, ax, start_angle, percent, counts,
             radius = 1.0 - (1.0 - hole) * (1 - pct_distance)
             ax.text(radius * np.cos(angle), radius * np.sin(angle),
                     f"{100 * value / total:.0f}%", ha="center", va="center",
-                    fontsize=fontsize - 1, color="white", weight="bold")
+                    fontsize=font_size(fontsize, "tick", -1), color="white", weight="bold")
     return wedges
 
 
@@ -967,7 +972,7 @@ def pieplot(data: Any = None,
             ax=None,
             figsize: Optional[Tuple[float, float]] = None,
             title: Optional[str] = None,
-            fontsize: float = 9,
+            fontsize: Optional[float] = None,
             return_stats: bool = False):
     r"""Pie chart of a composition.
 
@@ -1028,7 +1033,7 @@ def pieplot(data: Any = None,
                   hole=hole, ax=ax, start_angle=start_angle,
                   percent=percent_inside, counts=True,
                   label_style="none" if legend else label_style,
-                  fontsize=fontsize, explode=explode, edgecolor=edgecolor,
+                  fontsize=font_size(fontsize), explode=explode, edgecolor=edgecolor,
                   linewidth=linewidth, pct_distance=pct_distance,
                   label_distance=label_distance)
     if legend:
@@ -1037,13 +1042,13 @@ def pieplot(data: Any = None,
                   [f"{name}  ({100 * value / total:.1f}%)"
                    for name, value in series.items()],
                   loc=legend_loc, bbox_to_anchor=(1.0, 0.5), frameon=False,
-                  fontsize=fontsize)
+                  fontsize=font_size(fontsize))
     if centre_text:
         ax.text(0, 0, centre_text, ha="center", va="center",
-                fontsize=fontsize + 2)
+                fontsize=font_size(fontsize, "title"))
     ax.set_aspect("equal")
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
     shares = series / series.sum()
     return (ax, shares) if return_stats else ax
 
@@ -1119,7 +1124,7 @@ def slopeplot(data: Any = None,
               xlabel: Optional[str] = None,
               ylabel: Optional[str] = None,
               title: Optional[str] = None,
-              fontsize: float = 9,
+              fontsize: Optional[float] = None,
               return_stats: bool = False):
     r"""One line per subject across conditions.
 
@@ -1183,7 +1188,7 @@ def slopeplot(data: Any = None,
         if label_points:
             ax.annotate(str(name), (xs[-1], values[valid][-1]),
                         textcoords="offset points", xytext=(4, 0),
-                        fontsize=fontsize - 2, va="center")
+                        fontsize=font_size(fontsize, "tick", -2), va="center")
 
     if summary:
         if summary not in {"mean", "median"}:
@@ -1194,16 +1199,16 @@ def slopeplot(data: Any = None,
                 label=summary)
 
     ax.set_xticks(range(len(levels)))
-    ax.set_xticklabels([str(level) for level in levels], fontsize=fontsize)
+    ax.set_xticklabels([str(level) for level in levels], fontsize=font_size(fontsize))
     ax.set_xlim(-0.35, len(levels) - 0.65)
     ax.set_xlabel(xlabel if xlabel is not None else names.get("x", ""),
-                  fontsize=fontsize + 1)
+                  fontsize=font_size(fontsize, "label"))
     ax.set_ylabel(ylabel if ylabel is not None else names.get("y", ""),
-                  fontsize=fontsize + 1)
+                  fontsize=font_size(fontsize, "label"))
     if title:
-        ax.set_title(title, fontsize=fontsize + 2)
-    ax.tick_params(labelsize=fontsize)
-    ax.spines[["right", "top"]].set_visible(False)
+        ax.set_title(title, fontsize=font_size(fontsize, "title"))
+    ax.tick_params(labelsize=font_size(fontsize))
+    style_axes(ax)
 
     stats: Dict[str, Any] = {"wide": wide, "n_complete": int(len(complete))}
     if test:
@@ -1220,5 +1225,64 @@ def slopeplot(data: Any = None,
         ax.text(0.5, 1.01, f"{label}: {format_pvalue(pvalue, 'value')} "
                            f"(n={len(complete)})",
                 transform=ax.transAxes, ha="center", va="bottom",
-                fontsize=fontsize)
+                fontsize=font_size(fontsize))
     return (ax, stats) if return_stats else ax
+
+
+@register_function(
+    aliases=["violinplot", "表格小提琴图", "dataframe小提琴图", "long_form_violin",
+             "非adata小提琴图"],
+    category="pl",
+    description=(
+        "Violin plot from a long-form DataFrame or bare arrays. For an "
+        "AnnData with genes, layers and .raw use ov.pl.violin instead — this "
+        "is the container-free version, with split/clip/inner and tests"
+    ),
+    examples=[
+        "ax = ov.pl.violinplot(df, 'cell_type', 'score')",
+        "# Two conditions mirrored in one violin",
+        "ax = ov.pl.violinplot(df, 'cell_type', 'score', hue='condition',",
+        "                      split=True)",
+        "# With a Kruskal-Wallis omnibus and corrected pairwise brackets",
+        "ax, res = ov.pl.violinplot(df, 'arm', 'value', test='auto',",
+        "                           return_stats=True)",
+    ],
+    related=["pl.violin", "pl.stripplot", "pl.barplot", "pl.compare_groups"],
+)
+def violinplot(data: Any = None, x: Any = None, y: Any = None, **kwargs: Any):
+    r"""Deprecated: use :func:`omicverse.pl.violin`.
+
+    ``violin`` now covers everything this did — it accepts a DataFrame as well
+    as an AnnData, and gained ``hue`` / ``split`` / ``cut`` / ``clip`` /
+    ``inner`` / ``orient`` / ``test``. Two names for one plot is what made
+    ``ov.pl.violin`` and this function look like they came from different
+    libraries.
+
+    The translation is just the argument names: ``x`` is ``groupby`` and ``y``
+    is ``keys``. Rendering is unchanged — this always routes through the
+    kernel-density engine, so an existing call produces the same figure it did
+    before, with a warning.
+    """
+    from warnings import warn
+
+    warn(
+        "`ov.pl.violinplot` is deprecated; use `ov.pl.violin`, which now takes "
+        "a DataFrame and supports hue/split/cut/clip/inner/orient/test. "
+        "`violinplot(df, x, y)` becomes `violin(df, keys=y, groupby=x)`.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from ._violin import violin
+
+    # Keep this function's own defaults rather than inheriting violin's.
+    # The two signatures disagree on four of them, and every one changes the
+    # picture:
+    #   scale      forces the kernel-density engine (violin defaults to the
+    #              matplotlib one)
+    #   inner      violinplot drew the quartile box; violin defaults to none
+    #   stripplot  violin draws the raw points; violinplot did not
+    #   fontsize   violin pins 13; violinplot follows ov.plot_set
+    for name, value in (("scale", "width"), ("inner", "box"),
+                        ("stripplot", False), ("fontsize", None)):
+        kwargs.setdefault(name, value)
+    return violin(data, keys=y, groupby=x, **kwargs)

@@ -32,7 +32,8 @@ Key modules:
     _distribution: histplot/kdeplot/ridgeplot/qqplot
     _relational: scatterplot/lineplot/regplot
     _stats_tests: compare_groups + significance brackets
-    _plotdata: as_plotdata / accepts_frame — AnnData plots that also take a table
+    _plotdata: get_values / get_matrix — the one place a name becomes numbers;
+        as_plotdata / accepts_frame — AnnData plots that also take a table
     _survival: Kaplan-Meier and Aalen-Johansen curves, log-rank / Gray's test
     _classification: ROC curves and confusion matrices
     _forest: forest plots and fixed/random-effects meta-analysis
@@ -246,6 +247,7 @@ from ._plot_backend import (
     palette,
     plot_set,
     plotset,
+    style_axes,
     ov_plot_set,
     style,
     plot_text_set,
@@ -299,7 +301,9 @@ from ._categorical import (
 )
 from ._distribution import histplot, kdeplot, qqplot, ridgeplot
 from ._relational import lineplot, regplot, scatterplot
-from ._plotdata import ObsView, PlotData, accepts_frame, as_plotdata
+from ._plotdata import (ObsView, PlotData, accepts_frame, as_plotdata,
+                        get_matrix, get_values)
+from ._stats_common import font_size, font_sizes, kde_curve
 
 
 def curved_graph(*args, **kwargs):
@@ -488,6 +492,7 @@ __all__ = [
     "palette",
     "plot_set",
     "plotset",
+    "style_axes",
     "ov_plot_set",
     "style",
     "plot_text_set",
@@ -567,6 +572,11 @@ __all__ = [
     # @ _plotdata — let AnnData-shaped plots take a table
     "as_plotdata",
     "accepts_frame",
+    "get_values",
+    "get_matrix",
+    "font_size",
+    "font_sizes",
+    "kde_curve",
     "PlotData",
     "ObsView",
 ]

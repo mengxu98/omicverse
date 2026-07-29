@@ -1110,6 +1110,7 @@ def slopeplot(data: Any = None,
               y: Any = None,
               *,
               subject: Any = None,
+              group: Any = None,
               order: Optional[Sequence[Any]] = None,
               color_by: str = "direction",
               palette=None,
@@ -1137,6 +1138,12 @@ def slopeplot(data: Any = None,
     subject
         Column identifying the repeated unit (patient, donor, well). Required —
         without it there is nothing to connect.
+    group
+        Optional outer grouping. When given, ``x`` must hold exactly two
+        conditions: each ``group`` level becomes its own paired cluster along
+        the axis (the two conditions side by side, one line per ``subject``,
+        coloured by direction), rather than a single cluster spanning all ``x``
+        levels. This is the layout for "healthy vs disease within each site".
     color_by
         ``'direction'`` (default: up / down / flat), ``'subject'``, or the name
         of a column to colour by.
@@ -1158,8 +1165,88 @@ def slopeplot(data: Any = None,
     """
     if subject is None:
         raise TypeError("`subject` is required — it says which points connect.")
-    frame, names = resolve_columns(data, x=x, y=y, subject=subject,
-                                   require=("x", "y", "subject"))
+
+    if group is not None:
+        # cnsplots-style grouped paired slope: ``x`` holds the two conditions to
+        # connect, ``subject`` pairs them, and ``group`` lays out one paired
+        # cluster per level along the axis (e.g. one cluster per site, each
+        # showing healthy vs disease). The single-cluster path below cannot
+        # express this nesting — a subject there spans every ``x`` level, not a
+        # two-point pair repeated across an outer grouping.
+        frame, names = resolve_columns(
+            data, require=("x", "y", "subject", "group"),
+            x=x, y=y, subject=subject, group=group)
+        x_levels = group_levels(frame["x"], order)
+        if len(x_levels) != 2:
+            raise ValueError(
+                "grouped slopeplot (`group=`) connects exactly two `x` "
+                f"conditions; got {len(x_levels)}: {x_levels}.")
+        spans = frame.groupby("subject", observed=False)["group"].nunique()
+        if (spans > 1).any():
+            bad = spans.index[spans > 1][0]
+            raise ValueError(
+                f"`subject` {bad!r} spans more than one `group`; each paired "
+                "subject must sit in a single group.")
+        g_levels = group_levels(frame["group"])
+        c_left, c_right = ((palette[0], palette[1]) if palette
+                           else (down_color, up_color))
+        ax = _new_axes(ax, figsize, (max(2.8, 1.4 * len(g_levels)), 4.0))
+        for index, level in enumerate(g_levels):
+            sub = frame[frame["group"] == level]
+            wide = (sub.pivot_table(index="subject", columns="x", values="y",
+                                    aggfunc="mean", observed=False)
+                    .reindex(columns=x_levels).dropna())
+            left = wide[x_levels[0]].to_numpy(dtype=float)
+            right = wide[x_levels[1]].to_numpy(dtype=float)
+            x1, x2 = index - 0.2, index + 0.2
+            for low, high in zip(left, right):
+                ax.plot([x1, x2], [low, high],
+                        color=(c_left if low > high else c_right),
+                        linewidth=linewidth, alpha=alpha, zorder=2)
+            ax.scatter([x1] * len(left), left, color=c_left, s=markersize,
+                       linewidths=0.4, zorder=3)
+            ax.scatter([x2] * len(right), right, color=c_right, s=markersize,
+                       linewidths=0.4, zorder=3)
+        from matplotlib.lines import Line2D
+        handles = [Line2D([0], [0], marker=marker, linestyle="", color=c_left,
+                          markersize=np.sqrt(markersize), label=str(x_levels[0])),
+                   Line2D([0], [0], marker=marker, linestyle="", color=c_right,
+                          markersize=np.sqrt(markersize), label=str(x_levels[1]))]
+        ax.legend(handles=handles, fontsize=font_size(fontsize), frameon=False)
+        ax.set_xticks(range(len(g_levels)))
+        ax.set_xticklabels([str(level) for level in g_levels],
+                           fontsize=font_size(fontsize))
+        ax.set_xlim(-0.6, len(g_levels) - 0.4)
+        ax.set_xlabel(xlabel if xlabel is not None else names.get("group", ""),
+                      fontsize=font_size(fontsize, "label"))
+        ax.set_ylabel(ylabel if ylabel is not None else names.get("y", ""),
+                      fontsize=font_size(fontsize, "label"))
+        if title:
+            ax.set_title(title, fontsize=font_size(fontsize, "title"))
+        ax.tick_params(labelsize=font_size(fontsize))
+        style_axes(ax)
+        return ax
+
+    # `color_by` may name a subject-level metadata column (constant within each
+    # subject, e.g. a healthy/disease label). resolve_columns only keeps the
+    # columns it is handed, and the wide pivot below reduces the frame to y
+    # indexed by subject on x alone — so unless the metadata column is pulled in
+    # here and carried through the pivot, it is gone by the time we would colour
+    # by it. Validate it up front (naming the available columns, as before) and
+    # add it to the specs so it survives into `frame`.
+    color_meta = color_by not in {"direction", "subject"}
+    specs: Dict[str, Any] = dict(x=x, y=y, subject=subject)
+    if color_meta:
+        table = as_frame(data)
+        if table is None or color_by not in table.columns:
+            available = [] if table is None else list(table.columns)
+            raise ValueError(
+                f"`color_by` must be 'direction', 'subject' or a column; got "
+                f"{color_by!r}. Available columns: "
+                f"{', '.join(map(str, available))}."
+            )
+        specs["group"] = color_by
+    frame, names = resolve_columns(data, require=("x", "y", "subject"), **specs)
     levels = group_levels(frame["x"], order)
     positions = {level: index for index, level in enumerate(levels)}
 
@@ -1170,20 +1257,41 @@ def slopeplot(data: Any = None,
     ax = _new_axes(ax, figsize, (max(2.8, 1.3 * len(levels)), 4.0))
     first, last = levels[0], levels[-1]
     complete = wide[[first, last]].dropna()
-    if color_by not in {"direction", "subject"} and color_by not in frame:
-        raise ValueError(
-            f"`color_by` must be 'direction', 'subject' or a column; got "
-            f"{color_by!r}."
-        )
-    subject_colors = (dict(zip(wide.index, default_palette(len(wide), palette)))
-                      if color_by == "subject" else {})
+
+    # Colour resolution. For a metadata column, the pivot's mean aggregation
+    # cannot carry a label, so reduce it separately: one value per subject. A
+    # subject is a single line and so must have a single value — if the column
+    # varies within a subject it cannot decide a colour, which is a genuine
+    # error, not something to silently collapse.
+    group_colors: Dict[Any, Any] = {}
+    groups: List[Any] = []
+    if color_meta:
+        per_subject = frame.groupby("subject", observed=False)["group"]
+        multivalued = per_subject.nunique(dropna=False)
+        offenders = list(multivalued.index[multivalued > 1])
+        if offenders:
+            raise ValueError(
+                f"`color_by={color_by!r}` is not constant within every subject "
+                f"(e.g. subject {offenders[0]!r} takes more than one value). A "
+                f"subject is one line and cannot take two colours — colour by a "
+                f"subject-level attribute, or use color_by='subject'."
+            )
+        subject_group = per_subject.first()
+        groups = group_levels(frame["group"])
+        group_colors = dict(zip(groups, default_palette(len(groups), palette)))
+        subject_colors = {subject_id: group_colors[grp]
+                          for subject_id, grp in subject_group.items()}
+    elif color_by == "subject":
+        subject_colors = dict(zip(wide.index, default_palette(len(wide), palette)))
+    else:
+        subject_colors = {}
 
     for name, row in wide.iterrows():
         values = row.to_numpy(dtype=float)
         valid = ~np.isnan(values)
         if valid.sum() < 2:
             continue
-        if color_by == "subject":
+        if color_by == "subject" or color_meta:
             colour = subject_colors[name]
         else:
             ends = values[valid]
@@ -1206,6 +1314,19 @@ def slopeplot(data: Any = None,
         ax.plot(range(len(levels)), centre.to_numpy(dtype=float), color="black",
                 linewidth=2.4, marker="o", markersize=5, zorder=4,
                 label=summary)
+
+    if color_meta:
+        # One line per subject shares its group's colour, so the legend keys off
+        # the groups, not the individual subjects. Proxy handles keep it to one
+        # entry per group regardless of how many subjects it contains.
+        from matplotlib.lines import Line2D
+
+        handles = [Line2D([0], [0], color=group_colors[grp], linewidth=linewidth,
+                          marker=marker, markersize=np.sqrt(markersize),
+                          label=str(grp))
+                   for grp in groups]
+        ax.legend(handles=handles, title=names.get("group", color_by),
+                  fontsize=font_size(fontsize), frameon=False)
 
     ax.set_xticks(range(len(levels)))
     ax.set_xticklabels([str(level) for level in levels], fontsize=font_size(fontsize))

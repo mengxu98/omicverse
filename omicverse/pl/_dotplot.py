@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import marsilea as ma
 import marsilea.plotter as mp
+import inspect
 import warnings
 from matplotlib.colors import Normalize, Colormap
 from matplotlib.axes import Axes as _AxesSubplot
@@ -65,6 +66,11 @@ def dotplot(
     show: Optional[bool] = None,
     save: Optional[Union[str, bool]] = None,
     ax: Optional[_AxesSubplot] = None,
+    figure=None,
+    rect=None,
+    legend: bool = True,
+    legend_side: str = 'right',
+    legend_pad: float = 0.0,
     return_fig: Optional[bool] = False,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -174,6 +180,51 @@ def dotplot(
             UserWarning,
             stacklevel=2,
         )
+
+    # `rect` places the block inside a figure the caller already has.
+    #
+    # marsilea sizes and lays out its own figure, and the block's true extent
+    # cannot be read back from it — `get_size_inches` excludes axes it places at
+    # negative fractions, and a tightbbox union still misses the dot-size key and
+    # the colour bar, which are artists drawn inside a host axes and reach past
+    # its rectangle. So the block is not *fitted* to the region; it is mapped
+    # onto it proportionally, which is how cnsplots embeds the same kind of
+    # block.
+    #
+    # The consequence is worth stating: axes rectangles scale, text does not.
+    # Pass a `fontsize` suited to the region — cnsplots uses 6 for a panel of a
+    # multi-panel figure — or the labels and legends will be too large for the
+    # block they belong to.
+    if rect is not None:
+        if figure is None:
+            raise TypeError("`rect` places the dotplot inside a figure you "
+                            "supply — pass `figure=` as well.")
+        host_w, host_h = (float(v) for v in figure.get_size_inches())
+        existing = set(figure.axes)
+        dotplot(figsize=figsize, figure=figure, rect=None, show=False,
+                **{name: value for name, value in locals().items()
+                   if name in _DOTPLOT_PARAMS
+                   and name not in ("figsize", "figure", "rect", "show",
+                                    "host_w", "host_h", "existing")})
+        added = [axes for axes in figure.axes if axes not in existing]
+        figure.set_size_inches(host_w, host_h)
+
+        boxes = [axes.get_position().frozen() for axes in added]
+        left = min(b.x0 for b in boxes)
+        right = max(b.x1 for b in boxes)
+        bottom = min(b.y0 for b in boxes)
+        top = max(b.y1 for b in boxes)
+        span_w = max(right - left, 1e-9)
+        span_h = max(top - bottom, 1e-9)
+        x0, y0, width, height = rect
+        for axes, box in zip(added, boxes):
+            axes.set_position([
+                x0 + width * ((box.x0 - left) / span_w),
+                y0 + height * ((box.y0 - bottom) / span_h),
+                width * (box.width / span_w),
+                height * (box.height / span_h),
+            ])
+        return None
 
     # Convert var_names to list if string
     original_var_names_dict = None
@@ -468,11 +519,36 @@ def dotplot(
         m.add_title(top=title, pad=0.2, fontsize=fontsize + 1, fontweight="bold")
 
     # Add legends
-    m.add_legends(box_padding=2)
+    # marsilea can put the legends on any side; this used to be hardcoded to
+    # the right, which is also what makes the block too wide for a narrow
+    # panel — the dot-size key and the colour bar stack into a column beside
+    # the dots. `legend_side='bottom'` lays them under it instead.
+    if legend:
+        if legend_side not in ("right", "left", "top", "bottom"):
+            raise ValueError(
+                "`legend_side` must be 'right', 'left', 'top' or 'bottom', "
+                f"got {legend_side!r}.")
+        m.add_legends(side=legend_side, pad=legend_pad, box_padding=2)
     
-    # Render the plot
-    m.render()
-    fig = m.figure
+    # Render the plot.
+    #
+    # This deliberately does *not* accept a host figure. marsilea's layout for
+    # a SizedHeatmap-plus-legends block is composite, and `freeze` only resizes
+    # the figure for non-composite layouts — so the block's axes come out as
+    # fractions of whatever figure it is given and it fills that figure however
+    # large it is (measured: the same block reports 650 mm across in a 30 in
+    # figure and scales with it, at any font size). Translating it therefore
+    # cannot confine it to a region, and rescaling it would shrink the axes
+    # without shrinking the dot-size key, the colour bar or the tick labels.
+    #
+    # Placing one of these blocks properly needs marsilea's own layout anchors
+    # (`set_figsize` / `set_anchor`), which is a larger change than this.
+    if figure is None:
+        m.render()
+        fig = m.figure
+    else:
+        m.render(figure=figure)
+        fig = figure
 
     if save not in (None, False):
         save_path = Path(save) if isinstance(save, str) else Path("dotplot.png")
@@ -894,3 +970,6 @@ def markers_dotplot(
         return_fig=return_fig,
         **kwds,
     )
+
+
+_DOTPLOT_PARAMS = frozenset(inspect.signature(dotplot).parameters)

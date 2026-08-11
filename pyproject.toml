@@ -99,7 +99,7 @@ rust = [
 # was previously an UNDECLARED runtime dependency of a public function.
 #   pip install omicverse[cytometry]
 cytometry = [
-    "flowio>=1.3",
+    "flowio>=1.4",
 ]
 # Adds the scverse cytometry stack: compensation, logicle/biexponential
 # transforms and FlowSOM on top of the reader. Kept separate because flowutils
@@ -107,7 +107,7 @@ cytometry = [
 # itself needs.
 #   pip install omicverse[cytometry-full]
 cytometry-full = [
-    "flowio>=1.3",
+    "flowio>=1.4",
     "pytometry>=0.1.4",
 ]
 full = [
